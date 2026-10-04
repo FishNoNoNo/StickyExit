@@ -40,7 +40,7 @@
 ### Docker 部署
 
 ```bash
-git clone <你的仓库地址> sticky-exit
+git clone https://github.com/FishNoNoNo/StickyExit.git sticky-exit
 cd sticky-exit
 
 # 可选：按需修改端口、管理口令、对外 IP

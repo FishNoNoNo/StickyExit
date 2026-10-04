@@ -40,7 +40,7 @@ Each user only needs `username:password@server-ip:1080`. HTTP and SOCKS5 share t
 ### Docker
 
 ```bash
-git clone <your-repo-url> sticky-exit
+git clone https://github.com/FishNoNoNo/StickyExit.git sticky-exit
 cd sticky-exit
 
 # optional: adjust ports, admin token, advertised IP
