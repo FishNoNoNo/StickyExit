@@ -67,14 +67,6 @@ docker compose up -d
 >
 > 老版本 compose 把命令换成 `docker-compose` 即可。
 
-打 tag 发布时也会推送多架构镜像到 GitHub Container Registry：
-
-```bash
-docker pull ghcr.io/<owner>/sticky-exit:latest
-```
-
-发布出来的镜像既不含前端产物也不含 sing-box 二进制，仍需按 `docker-compose.yml` 的方式挂载 `web/static` 和 `lib`。
-
 `lib/` 目录中的 sing-box 二进制同样以 volume 挂载进容器。仓库自带 Linux amd64 与 Windows 版本，其它架构（如 arm64）请自行替换 `lib/sing-box-linux/sing-box`。
 
 ### 本地运行
@@ -202,23 +194,6 @@ sing-box 原生不支持 SSR，这类节点会被自动过滤并写日志。
 ## 使用与合规
 
 本项目用于把已购买的订阅在自有网络中分发。使用前请确认服务商条款允许，不要用于对外售卖或其它违法用途。订阅内容不会下发给用户，用户只拿到 `用户名:密码@IP:端口`。
-
-## CI 与发布
-
-`.github/workflows/ci.yml` 在推送到 `main` 和每个 PR 上运行：
-
-- 后端：字节码编译、导入冒烟测试、入口脚本语法检查
-- 前端：`npm ci`、`vue-tsc` 类型检查与 `vite build`；仓库中的 `web/static` 必须与构建结果一致
-- Docker：构建一次镜像，验证 Dockerfile
-
-发布版本时推一个 semver tag：
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-`.github/workflows/release.yml` 会构建 `linux/amd64` 与 `linux/arm64` 镜像，推送到 `ghcr.io/<owner>/sticky-exit`，并生成 GitHub Release。Dependabot 每月检查 pip、npm、Actions 和 Docker 的依赖更新。
 
 ## License
 

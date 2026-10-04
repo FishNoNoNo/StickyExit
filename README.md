@@ -68,14 +68,6 @@ If you set an admin token, open `http://SERVER_IP:5003/?token=YOUR_TOKEN`.
 >
 > On older Compose, use `docker-compose` instead.
 
-Tagged releases also publish a multi-arch image to GitHub Container Registry:
-
-```bash
-docker pull ghcr.io/<owner>/sticky-exit:latest
-```
-
-The published image contains neither the frontend build nor the sing-box binary, so mount `web/static` and `lib` the same way `docker-compose.yml` does.
-
 The sing-box binaries in `lib/` are mounted into the container the same way. The repository ships a Linux amd64 build and a Windows build. For other architectures (for example arm64), replace `lib/sing-box-linux/sing-box` with the matching build.
 
 ### Local Run
@@ -203,23 +195,6 @@ Fetches go out directly over httpx (async). Proxy panels commonly use self-signe
 ## Usage and Compliance
 
 This project redistributes a subscription you have already purchased across your own network. Check that your provider's terms allow it before use, and do not resell access or use it for anything unlawful. Subscription contents are never sent to users; they only receive `username:password@ip:port`.
-
-## CI and Releases
-
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
-
-- backend: byte-compile, import smoke test, entrypoint shell syntax check
-- frontend: `npm ci`, `vue-tsc` type-check and `vite build`; the committed `web/static` output must match the build
-- docker: build the image once to validate the Dockerfile
-
-To publish a version, push a semver tag:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-`.github/workflows/release.yml` then builds `linux/amd64` and `linux/arm64` images, pushes them to `ghcr.io/<owner>/sticky-exit`, and creates a GitHub Release with generated notes. Dependabot checks pip, npm, Actions, and Docker updates monthly.
 
 ## License
 
