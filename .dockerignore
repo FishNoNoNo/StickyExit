@@ -1,0 +1,24 @@
+# 本地虚拟环境与缓存：镜像内会重装依赖
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# 数据目录与二进制目录：运行时以 volume 挂载进容器，不进镜像
+data/
+lib/
+web/frontend
+web/static
+
+# 环境变量与本地杂项
+.env
+.git/
+.gitignore
+.idea/
+.vscode/
+*.log
+logs/

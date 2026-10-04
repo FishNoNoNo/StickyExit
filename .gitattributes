@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 检出后 shell 脚本带 CRLF 导致容器内 shebang 失效
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.exe binary
+lib/sing-box-linux/sing-box binary
+*.png binary
+*.jpg binary
+*.ico binary

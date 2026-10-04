@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+/* 设计令牌 -> 生成 bg-card / border-line / text-muted 等工具类 */
+@theme {
+  --color-bg: #0f1115;
+  --color-card: #171a21;
+  --color-line: #262b36;
+  --color-fg: #e6e9ef;
+  --color-muted: #8b93a5;
+  --color-acc: #4f8cff;
+  --color-ok: #34c98f;
+  --color-bad: #ff5d5d;
+
+  --font-sans: system-ui, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  color-scheme: dark;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* 节点 tag / 代理地址用的等宽代码块 */
+code {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: #0d0f14;
+  color: #9ecbff;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ---------- Element Plus 深色变量对齐本页配色 ---------- */
+.dark {
+  --el-bg-color: var(--color-card);
+  --el-bg-color-overlay: var(--color-card);
+  --el-fill-color-blank: #0d0f14;
+  --el-border-color: var(--color-line);
+  --el-border-color-light: var(--color-line);
+  --el-border-color-lighter: var(--color-line);
+  --el-text-color-primary: var(--color-fg);
+  --el-text-color-regular: var(--color-fg);
+  --el-text-color-secondary: var(--color-muted);
+  --el-color-primary: var(--color-acc);
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: transparent;
+  --el-table-border-color: var(--color-line);
+  --el-table-row-hover-bg-color: #1f2430;
+}
+
+.el-table th.el-table__cell {
+  color: var(--color-muted);
+  font-weight: 500;
+}
+
+/* Element Plus 给相邻按钮加了 margin-left，改用 gap 布局后需要去掉 */
+.ops .el-button + .el-button {
+  margin-left: 0;
+}

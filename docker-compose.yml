@@ -1,0 +1,18 @@
+services:
+  proxy-distributor:
+    build: .
+    image: stargrptech/sticky-exit:v1.0
+    container_name: proxy-distributor
+    restart: unless-stopped
+
+    ports:
+      - "1080:1080"
+      - "5003:5003"
+
+    volumes:
+      - ./lib:/app/lib:ro
+      - ./data:/app/data
+      - ./web/static:/app/web/static:ro
+
+    env_file:
+      - .env
