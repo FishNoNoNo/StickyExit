@@ -9,8 +9,10 @@ from .fetcher import (
     parse_clash_yaml,     # Clash YAML 文本
     clash_node_to_outbound,  # 单个 Clash 节点 -> sing-box outbound
     normalize_outbound,
+    stable_tag,           # 连接参数 -> 稳定 tag（与名称无关）
 )
 from .links import (
+    link_name,            # 单条链接 -> 显示名
     parse_plain_links,    # 纯文本 URL 列表
     url_to_outbound,      # 单条节点链接 -> sing-box outbound
 )
@@ -18,4 +20,5 @@ from .links import (
 __all__ = [
     "fetch_nodes", "parse_clash_yaml", "parse_plain_links",
     "clash_node_to_outbound", "normalize_outbound", "url_to_outbound",
+    "link_name", "stable_tag",
 ]

@@ -120,6 +120,12 @@ outbounds by `parser/links.py`:
 Anything else is skipped with a log line instead of failing the whole import —
 including SSR, which sing-box removed in 1.6.
 
+Display names come from the link's `#remark` (for vmess, the `ps` field inside
+the base64 payload), falling back to `type host:port`. Names are fully decoupled
+from node tags — a tag is derived from the connection config only, so renaming
+or re-importing a subscription never duplicates nodes. Use the row's "Edit"
+action to rename a node; it takes effect immediately and needs no reload.
+
 ## What Users Receive
 
 After creating a user, the page shows:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import re
 
@@ -14,7 +15,7 @@ import httpx
 import yaml
 
 import config
-from parser.links import parse_plain_links, url_to_outbound
+from parser.links import link_name, parse_plain_links, url_to_outbound
 
 logger = logging.getLogger("distributor.fetcher")
 
@@ -340,20 +341,25 @@ def clash_node_to_outbound(proxy: dict) -> dict:
     raise ValueError(f"不支持的节点类型: {ptype}")
 
 
-def _stable_tag(name: str, server: str, port: int, idx: int = 0) -> str:
-    """节点唯一 tag：原始名 + 服务器 + 端口 hash。"""
-    raw = f"{name}|{server}|{port}"
+# tag 只由「连接配置」决定，与显示名无关：改名 / 重新导入同一订阅都不会
+# 改变 tag，否则同一个节点会在库里裂成好几份。
+#
+# 哈希的粒度是整份 outbound（而不是只挑 server/port/uuid）：同一台机器上
+# 的两条节点常常只有 ws path / SNI / transport 不同，只看几个字段会把它们
+# 误判成同一条，迁移时直接把其中一个吃掉。
+def stable_tag(out: dict) -> str:
+    """节点的稳定 tag：连接配置（outbound 去掉 tag）hash，不含名称。"""
+    body = {k: v for k, v in out.items() if k != "tag"}
+    raw = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
     return f"node-{h}"
 
 
 def normalize_outbound(out: dict, name: str) -> dict:
-    """给转换后的 outbound 补上稳定 tag；name 去重后缀。"""
+    """补上稳定 tag；name 只做展示，不参与 tag。"""
     out = dict(out)
     out.pop("tag", None)
-    server = out.get("server", "")
-    port = int(out.get("server_port") or 0)
-    tag = _stable_tag(str(name), server, port, out.get("uuid") or out.get("password") or "")
+    tag = stable_tag(out)
     out["tag"] = tag
     return {"tag": tag, "name": str(name), "outbound": out}
 
@@ -394,7 +400,7 @@ async def fetch_nodes(url: str) -> list[dict]:
             except Exception as e:
                 logger.warning("跳过链接: %s", e)
                 continue
-            node = normalize_outbound(out, u)
+            node = normalize_outbound(out, link_name(u, out))
             if node["tag"] in seen:
                 continue
             seen.add(node["tag"])

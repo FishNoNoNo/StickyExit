@@ -76,6 +76,7 @@ class DB:
             )
             self._migrate_users()
             self._migrate_user_nodes()
+            self._migrate_node_tags()
 
     def _migrate_users(self):
         """给旧库补列（ALTER TABLE ADD COLUMN 幂等，重复启动不会报错）。"""
@@ -102,6 +103,57 @@ class DB:
             [(r[0], r[1]) for r in rows],
         )
         logger.info("已把 %d 个用户的单节点分配迁移为节点池", len(rows))
+
+    def _migrate_node_tags(self):
+        """把历史 tag（hash 里含显示名）重算成连接参数 tag（幂等）。
+
+        旧公式把显示名揉进了 tag，于是改名 / 重导订阅会算出新 tag，同一个
+        节点在库里裂成好几份。这里按新公式重算一次；重算后相撞（本质是同
+        一个连接）就保留已有行，把旧行的用户池引用并过去再删掉旧行。
+        """
+        from parser.fetcher import stable_tag  # 延迟导入，避免模块循环
+
+        with self._lock:
+            rows = self._conn.execute("SELECT tag, outbound FROM nodes").fetchall()
+        if not rows:
+            return
+        moved = 0
+        with self._lock, self._conn:
+            for old_tag, outbound_json in rows:
+                try:
+                    out = json.loads(outbound_json)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(out, dict):
+                    continue
+                new_tag = stable_tag(out)
+                if new_tag == old_tag:
+                    continue
+                out["tag"] = new_tag
+                if self._conn.execute(
+                    "SELECT 1 FROM nodes WHERE tag = ?", (new_tag,)
+                ).fetchone():
+                    # 已有同一连接的行：并池引用后丢弃这份重复行。
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO user_nodes(username, tag, position) "
+                        "SELECT username, ?, position FROM user_nodes WHERE tag = ?",
+                        (new_tag, old_tag),
+                    )
+                    self._conn.execute("DELETE FROM user_nodes WHERE tag = ?", (old_tag,))
+                    self._conn.execute("DELETE FROM nodes WHERE tag = ?", (old_tag,))
+                else:
+                    self._conn.execute(
+                        "UPDATE nodes SET tag = ?, outbound = ? WHERE tag = ?",
+                        (new_tag, json.dumps(out, ensure_ascii=False), old_tag),
+                    )
+                    self._conn.execute(
+                        "UPDATE OR IGNORE user_nodes SET tag = ? WHERE tag = ?",
+                        (new_tag, old_tag),
+                    )
+                    self._conn.execute("DELETE FROM user_nodes WHERE tag = ?", (old_tag,))
+                moved += 1
+        if moved:
+            logger.info("已把 %d 个节点的 tag 迁移为「与名称无关」的连接 tag", moved)
 
     def close(self):
         with self._lock:
@@ -193,6 +245,14 @@ class DB:
                 "UPDATE nodes SET healthy = ?, last_check = ? WHERE tag = ?",
                 (1 if healthy else 0, time.strftime("%Y-%m-%d %H:%M:%S") + " " + detail, tag),
             )
+
+    def set_node_name(self, tag: str, name: str) -> bool:
+        """改节点的显示名。name 与 tag 解耦：改名不动 tag，也不需要重载。"""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE nodes SET name = ? WHERE tag = ?", (name, tag)
+            )
+        return cur.rowcount > 0
 
     def delete_node(self, tag: str) -> tuple[bool, list[str]]:
         """删除节点，并把它从所有用户的节点池里摘掉。

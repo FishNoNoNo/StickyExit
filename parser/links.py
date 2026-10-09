@@ -388,3 +388,39 @@ def url_to_outbound(url: str) -> dict:
     if scheme.startswith("socks"):
         return parser(url, scheme)
     return parser(url)
+
+
+def _vmess_ps(url: str) -> str:
+    """解出 vmess 链接 base64 JSON 里的 ps 字段（标准备注名）。"""
+    try:
+        payload = url[len("vmess://"):].split("#", 1)[0]
+        data = json.loads(_b64_try_decode(payload))
+        return str(data.get("ps") or "").strip()
+    except Exception:
+        return ""
+
+
+def link_name(url: str, out: dict | None = None) -> str:
+    """给一条节点链接取显示名（只用于展示，不参与 tag）。
+
+    优先级：URL 的 ``#备注`` → vmess 的 ``ps`` 字段 → ``类型 host:port``。
+    裸粘贴链接时名字就来自这里，比直接拿整条 URL 当名字好读；
+    而且 tag 与名字解耦，这个名字随时可以在页面上改。
+    """
+    if "#" in url:
+        frag = urllib.parse.unquote(url.split("#", 1)[1]).strip()
+        if frag:
+            return frag
+    if out is None:
+        try:
+            out = url_to_outbound(url)
+        except Exception:
+            return url
+    if str(out.get("type") or "").lower() == "vmess":
+        ps = _vmess_ps(url)
+        if ps:
+            return ps
+    server = str(out.get("server") or "").strip()
+    if server:
+        return f"{out.get('type', 'node')} {server}:{out.get('server_port', '')}"
+    return url
