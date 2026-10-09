@@ -26,6 +26,7 @@ from auth import (
     activate, create_user, delete_user, proxy_endpoint, reset_password,
     revoke,
 )
+from auth.allocator import check_all_and_mark
 from converter import (
     Supervisor, SupervisorError, drop_invalid_nodes, generate_and_validate,
 )
@@ -50,6 +51,8 @@ def _apply(db: DB, action: str) -> dict:
     成功返回 {"ok": True}，失败抛 ConfigApplyError。调用方应据此回 5xx，
     因为此时"数据库里的改动"与"实际生效状态"可能已经不一致，
     必须让人知道，而不是假装成功。
+
+    健康探测不在这里触发：手动点"检测节点"时才探测（全量，并发）。
     """
     try:
         cfg = generate_and_validate(db)
@@ -252,6 +255,18 @@ def create_app(db: DB | None = None) -> FastAPI:
         } for n in _db.get_nodes()]
         return _json({"nodes": options})
 
+    @app.post("/api/nodes/check")
+    async def api_nodes_check():
+        """手动全量健康检测：并发探测所有节点 -> 写回 healthy 标注。
+
+        探测在锁外跑（纯网络读 + DB 写），不阻塞其它请求太久；
+        触发锁唯一可能卡一下的是写同一行时的行锁，量级可忽略。
+        """
+        _db = get_db()
+        result = check_all_and_mark(_db)
+        # 结果里的 unhealthy 是节点名（列表页好懂）；数量上 healthy=总-坏
+        return _json(result)
+
     @app.post("/api/nodes/{tag:path}/delete")
     async def api_node_delete(tag: str):
         """删除节点：绑在它上面的用户自动迁移到其他节点。
@@ -265,8 +280,8 @@ def create_app(db: DB | None = None) -> FastAPI:
             if not _db.get_node(tag):
                 return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
             _db.delete_node(tag)
-            # 被删节点上可能还绑着用户：从剩余节点里重新分配；
-            # 一个都分不出去的进 doomed，由前端明确告知。
+            # 被删节点上可能还绑着用户：从剩余节点里重新分配；这是"删除"这个
+            # 用户主动触发的显式动作，不属于自动迁移。
             from auth.allocator import ensure_all_users_have_node
             changed, doomed = ensure_all_users_have_node(_db, _db.get_nodes())
             try:

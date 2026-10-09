@@ -7,7 +7,8 @@
 """
 from .allocator import (
     assign_node, ensure_all_users_have_node,
-    check_node_connectivity, check_and_mark, reassign_dead,
+    check_node_connectivity, check_and_mark, check_bound_and_mark,
+    check_all_and_mark, reassign_dead,
 )
 from .users import (
     create_user, verify, revoke, activate, delete_user,
@@ -16,7 +17,8 @@ from .users import (
 
 __all__ = [
     "assign_node", "ensure_all_users_have_node",
-    "check_node_connectivity", "check_and_mark", "reassign_dead",
+    "check_node_connectivity", "check_and_mark", "check_bound_and_mark",
+    "check_all_and_mark", "reassign_dead",
     "create_user", "verify", "revoke", "activate", "delete_user",
     "reset_password", "proxy_endpoint",
 ]

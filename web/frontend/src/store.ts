@@ -119,6 +119,20 @@ export async function reloadSingBox(): Promise<void> {
   await loadStatus();
 }
 
+/** 手动全量健康检测：探测所有节点并回写健康标注，随后刷新节点列表。 */
+export async function checkNodes(): Promise<CheckResult> {
+  const d = await post<CheckResult>("/api/nodes/check");
+  await Promise.all([loadNodes(), loadNodeOptions()]);
+  return d;
+}
+
+export interface CheckResult {
+  checked: number;
+  healthy: number;
+  /** 不合格节点名列表 */
+  unhealthy: string[];
+}
+
 export async function createUser(username: string, prefer?: string): Promise<CreatedUser> {
   const body: { username: string; prefer?: string } = { username };
   if (prefer) body.prefer = prefer;

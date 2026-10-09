@@ -18,10 +18,13 @@ async function onImport() {
   importing.value = true;
   try {
     // 导入是增量合并：已有 tag 更新、新 tag 追加，不会清空原有节点。
+    // 健康检查 + 迁移会在导入的 _apply 里跑一次，节点列表的 healthy 会顺带更新。
     const d = await importNodes(kind.value, source);
-    ElMessage.success(
-      "解析 " + d.count + " 个节点：新增 " + d.added + "，更新 " + d.updated,
-    );
+    let msg = "解析 " + d.count + " 个节点：新增 " + d.added + "，更新 " + d.updated;
+    if (d.skipped && d.skipped.length > 0) {
+      msg += "；跳过 " + d.skipped.length + " 个不支持的节点";
+    }
+    ElMessage.success(msg);
   } catch (e) {
     ElMessage.error("导入失败: " + (e as Error).message);
   } finally {

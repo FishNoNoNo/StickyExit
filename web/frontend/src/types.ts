@@ -52,4 +52,6 @@ export interface ImportResult {
   added: number;
   /** 覆盖更新的已有节点数 */
   updated: number;
+  /** 被 sing-box 判定无法使用、未入库存的节点名（列表页"导入前就已剔除"） */
+  skipped?: string[];
 }

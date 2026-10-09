@@ -2,6 +2,7 @@
 import { h, ref, watch } from "vue";
 import { Delete, Search, User } from "@element-plus/icons-vue";
 import {
+  checkNodes,
   createUser,
   deleteNode,
   loadNodes,
@@ -19,6 +20,7 @@ const targetName = ref("");
 const username = ref("");
 const creating = ref(false);
 const deleting = ref("");
+const checking = ref(false);
 
 // 搜索框：输入时防抖 300ms 再查，回车立即查。过滤在后端做，只拉当前页。
 const keyword = ref(nodeSearch.value);
@@ -112,20 +114,47 @@ async function onPageChange(page: number) {
 async function onSizeChange(size: number) {
   await loadNodes(1, size);
 }
+
+/** 手动全量健康检测：探测所有节点 -> 标注 -> 刷新列表。 */
+async function onCheckAll() {
+  checking.value = true;
+  try {
+    const r = await checkNodes();
+    if (r.checked === 0) {
+      ElMessage.info("暂无节点可检测");
+    } else if (r.unhealthy.length) {
+      ElMessage.warning(
+        "检测完成：" + r.healthy + "/" + r.checked + " 健康；异常 " +
+        r.unhealthy.length + " 个：" + r.unhealthy.join("、"),
+      );
+    } else {
+      ElMessage.success("检测完成：" + r.checked + " 个节点全部健康");
+    }
+  } catch (e) {
+    ElMessage.error("检测失败: " + (e as Error).message);
+  } finally {
+    checking.value = false;
+  }
+}
 </script>
 
 <template>
   <section class="mb-5 rounded-[10px] border border-line bg-card p-4">
     <div class="mb-3 flex flex-wrap items-center justify-between gap-2.5">
       <h2 class="m-0 text-[15px] font-semibold">节点列表</h2>
-      <el-input
-        v-model="keyword"
-        placeholder="搜索名称 / tag / 服务器"
-        clearable
-        class="w-[240px]"
-        :prefix-icon="Search"
-        @keyup.enter="onSearchNow"
-      />
+      <div class="flex items-center gap-2">
+        <el-button size="small" :loading="checking" @click="onCheckAll">
+          {{ checking ? "检测中…" : "检测全部节点" }}
+        </el-button>
+        <el-input
+          v-model="keyword"
+          placeholder="搜索名称 / tag / 服务器"
+          clearable
+          class="w-[240px]"
+          :prefix-icon="Search"
+          @keyup.enter="onSearchNow"
+        />
+      </div>
     </div>
     <el-table
       :data="nodes"
