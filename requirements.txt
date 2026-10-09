@@ -5,6 +5,4 @@ httpx
 pyyaml
 psutil
 
-# 定时跑节点健康探测/故障转移，不手写 sleep 循环。
-# 钉在 3.x：4.x 是另一套 API 且长期停在 alpha。
 apscheduler>=3.10,<4

@@ -105,7 +105,9 @@ async function onCreate() {
     const u = await createUser(username);
     ElMessage.success({
       message: multiline(
-        "已创建 " + u.username + "，节点池 " + u.nodes.length + " 个：" + poolNamesText(u.nodes) +
+        (u.nodes.length === 0
+          ? "已创建 " + u.username + "，节点池为空\n请用“节点池”按钮配置节点"
+          : "已创建 " + u.username + "，节点池 " + u.nodes.length + " 个：" + poolNamesText(u.nodes)) +
         "\n代理: " + u.proxy +
         "\n注意：配置需手动点\"重载\"后才能生效",
       ),
@@ -140,7 +142,7 @@ async function onRevoke(name: string) {
 async function onActivate(name: string) {
   try {
     await ElMessageBox.confirm(
-      "恢复用户 " + name + "？将保留原节点池（为空则重新分配），并发放全新口令（旧口令不再有效）。",
+      "恢复用户 " + name + "？将保留原节点池（为空则保持空池），并发放全新口令（旧口令不再有效）。",
       "恢复确认",
       { type: "warning", confirmButtonText: "恢复", cancelButtonText: "取消" },
     );
@@ -274,7 +276,7 @@ function rowClass({ row }: { row: { status: string } }) {
         @keyup.enter="onCreate"
       />
       <el-button type="primary" :icon="Plus" :loading="creating" @click="onCreate">
-        建用户（自动分配节点池）
+        建用户（空池起步）
       </el-button>
     </div>
 

@@ -1,12 +1,14 @@
-# 任务：把前端从「每个用户一个节点」改成「每个用户一个节点池」
+# 前端节点池改造交接（已完成）
 
-你正在接手一个 Vue 3 + TypeScript + Vite + Tailwind CSS + Element Plus 的管理前端（`D:\code\my_project\proxy-distributor\web\frontend`）。**后端的 API 已经全部改完并验证过了，你只需要改前端，完工后 `npm run build` 生成到 `web/static`。**
+> 本文是节点池改造时的工作记录，代码已经落地。当前契约以 README 和 `web/server.py` 为准。
+
+本前端是 Vue 3 + TypeScript + Vite + Tailwind CSS + Element Plus 的管理前端（`D:\code\my_project\proxy-distributor\web\frontend`）。改造时后端 API 已经全部改完并验证过，前端完成改造后通过 `npm run build` 生成到 `web/static`。
 
 ## 背景：后端已经改成什么样子（这些事实是权威，别猜）
 
 产品从「一用户绑死一个节点」改成了「一用户一个节点池」。池的**数组顺序就是优先级**（越靠前越优先）；运行时优先走池里第一个可用节点，它连续失败 N 次才自动降到下一个，恢复后自动回到优先级最高的。池与池**允许重叠**；池可以为空；池大小无上限。用户的代理地址（`http://user:pass@host:1080`）**一个字节都没变**，客户端零感知。
 
-后端 API 现在的真实形状（对照你手头的旧代码，这是新的契约）：
+后端 API 的实际契约如下：
 
 ### `GET /api/users`（每页一批用户）
 ```json
@@ -27,19 +29,16 @@
   "total": 15, "page": 1, "page_size": 10
 }
 ```
-> 旧的 `node_tag` / `node_name` 两个字段**已经彻底删掉**了，不要去找。
-
 ### `POST /api/users`（建号）→ 返回 `{ "user": { "username", "password", "nodes": [...], "proxy" } }`
 > 入参可以带 `prefer: "<tag>"`，含义=「把这个节点放进池首」（节点行上的「加用户」按钮走它）。`nodes` 是数组。
 
-### `POST /api/users/{username}/pool`（**替代** 旧 `…/switch`）
+### `POST /api/users/{username}/pool`
 - 入参 `{ "tags": ["node-a", "node-b"] }` —— **数组顺序就是优先级**。
 - 允许 `tags: []`（空池=该用户暂时不进代理；后端接受），长度无上限。
 - 后端会自己去重、校验 tag 存在；返回 `{ ok, tags, pending_reload }`。
-- **旧的 `POST /api/users/{username}/switch`（body `{tag: 单值}`）已经被删掉了。**
 
 ### `POST /api/nodes/{tag}/delete`
-- 返回从旧的 `{ migrated: string[], doomed: string[] }` 改成了 **`{ ok, tag, removed_from: string[], pending_reload }`**（`removed_from` = 哪些用户的池里含这个节点）。
+- 返回 **`{ ok, tag, removed_from: string[], pending_reload }`**（`removed_from` = 哪些用户的池里含这个节点）。
 - 语义：节点删除只是把这个 tag 从所有用户池里摘掉，**没有自动迁移、没有 doomed**。被摘空的池就空着。
 
 ### 其它没变的
@@ -47,7 +46,7 @@
 - `GET /api/nodes/options`：`{ nodes: [{ tag, name, healthy }] }`，没变，复用给池编辑器。
 - `/api/status`、导入、停用/恢复/改密/删除用户：没变。
 
-## 要改的文件（精确到行）
+## 改造时的文件清单（已完成）
 
 ### 1. `src/types.ts`
 - `UserRow`（现 [:32-40](web/frontend/src/types.ts#L32-L40)）：删除 `node_tag: string` 和 `node_name: string`，改成：
@@ -114,7 +113,7 @@ export async function setPool(username: string, tags: string[]): Promise<void> {
 - 删节点确认文案（现 [:77-92](web/frontend/src/components/NodesTable.vue#L77-L92)）：`d.migrated` / `d.doomed` 已不存在。改成新语义：**节点会从所有包含它的用户池里移除，池可能因此变空**。成功回调里用 `d.removed_from` 提示「影响 N 个用户的节点池」（为 0 就不提示）。
 - `用户数` 列（[:177-179](web/frontend/src/components/NodesTable.vue#L177-L179)）文案注释不用改字段，但含义已变成「多少用户的池包含它」——如果同步更新的列 header 或 tooltip 有说明文字，顺带改；否则数字照常显示即可。
 
-### 5. 收尾
+### 5. 改造时的收尾
 - `cd web\frontend && npm install && npm run build`，确认产物写进 `web/static/`（`.dockerignore` 排除了它，运行时由后端挂载/托管，注意 `web/static/assets` 里的旧 bundle 文件名会被新 hash 覆盖替换，`index.html` 引用也跟着变——让 build 自己处理）。
 - `npm run dev` 可连 `127.0.0.1:5003` 的后端联调（vite proxy 已配好）。
 - 用 `vue-tsc` / `tsc` 过一遍类型，别留 `node_tag` 引用。

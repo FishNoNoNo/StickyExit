@@ -1,12 +1,11 @@
-"""存储层：SQLite。用户、节点、分配记录，全部持久化。
+"""存储层：SQLite。用户、节点、节点池记录，全部持久化。
 
 设计要点：
 - 所有写操作走单例连接 + 事务，进程内线程安全。
 - 节点表存 outbound_json，导入时按 tag 增量合并：已有节点更新，缺失节点新增，
   不会因为一次导入就把之前拉到的节点删掉。
 - 用户 → 节点池的归属存在 user_nodes 表，它是唯一权威：一个用户可以有多个
-  节点，position 就是池内优先级（越小越优先）。旧列 users.node_tag 是单节点
-  时代的遗留，backfill 之后不再读写。
+  节点，position 就是池内优先级（越小越优先）。
 - users.status 只有 'active' / 'revoked' 两种；停用 = 移出 sing-box 配置 + 立刻作废口令。
 """
 from __future__ import annotations
@@ -86,11 +85,10 @@ class DB:
                 self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
 
     def _migrate_user_nodes(self):
-        """把单节点时代的 users.node_tag 灌进 user_nodes（幂等）。
+        """把 users.node_tag 灌进 user_nodes（幂等）。
 
         只在「该用户在 user_nodes 里一行都没有」时才灌，所以重复启动不会
-        覆盖后来在前端改过的池。灌完 user_nodes 就是权威，node_tag 只当
-        回滚抓手留着，之后不再读写。
+        覆盖后来在前端改过的池。
         """
         rows = self._conn.execute(
             "SELECT username, node_tag FROM users "
@@ -404,8 +402,6 @@ class DB:
             ("id", "username", "password", "node_tag", "status", "created_at",
              "updated_at", "revoked_at"), row
         ))
-        # node_tag 是单节点时代的遗留列，backfill 之后不再有权威值。
-        # 留着它外泄只会让调用方读到一个永远过期的节点。
         u.pop("node_tag", None)
         return u
 

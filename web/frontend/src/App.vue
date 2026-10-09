@@ -32,7 +32,7 @@ onUnmounted(() => {
   <div class="mx-auto max-w-7xl p-6">
     <h1 class="m-0 mb-1 text-xl font-semibold">StickyExit</h1>
     <p class="m-0 mb-5 text-xs text-muted">
-      节点解析 → 认证分配 → sing-box 输出代理 IP 端口
+      节点解析 → 用户节点池 → sing-box 输出代理 IP 端口
     </p>
 
     <StatCards />

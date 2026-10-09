@@ -2,53 +2,20 @@
 
 策略：
 1. 一个用户一个池，**池内顺序就是优先级**（越靠前越优先）。
-2. 池与池之间允许重叠 —— 单节点时代的「一个节点只能给一个人」独占语义已经
-   整个去掉了（`used_node_tags` 随之删除）。
-3. 新用户 → 按用户名做稳定轮转，从全量节点里取 k 个入池。
-4. 删节点只摘不补：池里的失效成员被摘掉，摘空了就空着，不自动补人。
-5. 这里只负责「标注」和「建池」，不做任何迁移。运行时的降级 / 回切由
+2. 池与池之间允许重叠。
+3. 删节点只摘不补：池里的失效成员被摘掉，摘空了就空着，不自动补人。
+4. 这里只负责「标注」和「建池」，不做任何迁移。运行时的降级 / 回切由
    converter/health.py 通过 Clash API 完成 —— 那是运行期行为，不是分配行为。
 """
 from __future__ import annotations
 
 import logging
 import socket
-from typing import Iterable
-
 import config
 from storage import DB
 import storage
 
 logger = logging.getLogger("distributor.allocator")
-
-
-def assign_pool(username: str, nodes: list[dict],
-                k: int = config.POOL_SIZE,
-                prefer: str | None = None) -> list[str]:
-    """按用户名挑一个有序节点池。返回 [] 表示一个可用节点都没有。
-
-    注意：建号 / 恢复现在都走「空池起步」（用户自己配池），这个函数目前并
-    没有被调用 —— 留着以备将来「一键随机配池」之类的功能使用，逻辑经过
-    验证可复用。
-
-    轮转输入是**全量节点按 tag 排序**，不是健康子集：健康状态会被手动的
-    「检测节点」按钮整批翻转，拿它当轮转输入，一次健康检查就能把所有人的
-    池重排一遍，配置摘要跟着变，Supervisor 会平白无故重启 sing-box。
-
-    哈希必须**稳定**：这里用 sum(ord(c))，不能用内置 hash() —— 后者每个
-    进程加盐，重启一次池顺序就全变。
-
-    prefer 命中的节点会被提到池首。
-    """
-    tags = sorted({n["tag"] for n in nodes})
-    if not tags:
-        return []
-    k = max(1, min(k, len(tags)))
-    start = sum(ord(c) for c in username) % len(tags)
-    picked = [tags[(start + i) % len(tags)] for i in range(k)]
-    if prefer and prefer in tags:
-        picked = ([prefer] + [t for t in picked if t != prefer])[:k]
-    return picked
 
 
 def prune_user_pools(db: storage.DB, nodes: list[dict]) -> list[str]:

@@ -8,7 +8,6 @@
 
 重启失败必须返回错误并说明代理当前是停着的，绝不能"数据库改了就说成功"。
 
-与旧 Flask 版本的差异：Web 框架换成 FastAPI，/api/* 契约保持不变；
 前端为 Vue3 + Tailwind + Element Plus 构建产物（web/static），由本服务直接托管。
 """
 from __future__ import annotations
@@ -221,8 +220,8 @@ def create_app(db: DB | None = None) -> FastAPI:
             try:
                 _db = get_db()
                 # 增量合并：已有 tag 更新，新 tag 追加，绝不清空已有节点。
-                # 添加节点不会删除任何旧节点，已有用户的绑定不受影响，
-                # 所以这里不需要（更不应该）重新分配用户节点。
+                # 添加节点不会删除任何旧节点，已有用户的节点池不受影响，
+                # 所以这里不需要（更不应该）重写用户节点池。
                 # 注意：只入库，不重载。运行中的 sing-box 还是旧配置，
                 # 手动点"重载"后才生效。
                 added, updated = _db.add_nodes(nodes)
@@ -259,7 +258,7 @@ def create_app(db: DB | None = None) -> FastAPI:
 
     @app.get("/api/nodes/options")
     async def api_node_options():
-        """全部节点的轻量列表（只有 tag/name/healthy），供「换节点」下拉使用。
+        """全部节点的轻量列表（只有 tag/name/healthy），供「节点池」编辑器使用。
 
         节点列表本身已分页，下拉不能只依赖当前页；这里只回三个字段，
         即便有几千个节点体积也很小。
@@ -346,7 +345,7 @@ def create_app(db: DB | None = None) -> FastAPI:
 
         - 不带 prefer：**空池**起步（节点池由用户自己在池编辑器里配）。
         - 带 prefer=<tag>（节点行「加用户」）：**单成员池 [tag]** —— 快捷把该
-          节点与用户绑定。
+          节点放入其节点池首位。
         """
         _db = get_db()
         try:

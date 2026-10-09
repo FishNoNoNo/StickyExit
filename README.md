@@ -2,38 +2,38 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Turn a single proxy subscription into multiple long-lived proxies, with one fixed exit IP per user.
+Turn a single proxy subscription into multiple long-lived proxies, with an ordered node pool per user that fails over by priority.
 
 ## Background
 
 Some workloads need several long-lived exit IPs. Commercial long-lived proxies are billed per IP, which makes them expensive for this use case.
 
-Every node in a proxy subscription is its own server with its own exit IP. StickyExit treats those nodes as an exit pool, runs one authenticated proxy port on your machine, and binds each user to one node. The result is multiple exit IPs served through a single port.
+Every node in a proxy subscription is its own server with its own exit IP. StickyExit treats those nodes as an exit pool, runs one authenticated proxy port on your machine, and gives each user an ordered pool of nodes. Traffic uses the highest-priority node by default; after the configured number of consecutive failures it falls back to the next available member, and switches back automatically after the original node recovers.
 
 ```
-user alice ──┐
-             ├─ mixed:1080 (auth) ─ routing ─┬─> node A (exit IP 1)
-user bob   ──┘                               └─> node B (exit IP 2)
+user alice (pool: A → B) ──┐
+                           ├─ mixed:1080 (auth) ─ routing ─> A / B / C (their exit IPs)
+user bob   (pool: B → C) ──┘
 ```
 
-Each user only needs `username:password@server-ip:1080`. HTTP and SOCKS5 share that port, and sing-box dispatches each user to their own node through a mixed inbound plus `auth_user` routing rules.
+Each user only needs `username:password@server-ip:1080`. HTTP and SOCKS5 share that port; sing-box routes each user through their own selector group using `auth_user` rules, and the order of nodes in the pool is the priority order.
 
 ## Features
 
 - One sing-box process and one entry port; low memory footprint
-- One-to-one user-to-node binding, so users never share an exit
+- One ordered node pool per user; pools may overlap while authenticated routes stay isolated
 - Node import from subscription URL, Clash YAML, base64, or plain node links (one per line). Import appends to the pool instead of replacing it
-- SQLite persistence for nodes and users; existing assignments survive restarts
-- Node health checks (TCP probe) and automatic failover
-- Config validated with `sing-box check` before every hot reload
-- Web UI: searchable and paginated node list, paginated user list, create a user directly from a node row, delete a node, one-click copy of proxy addresses
+- SQLite persistence for nodes, users, and node pools; configuration survives restarts
+- Node health checks with runtime failover and recovery: prefer Clash API delay probes, fall back to TCP; switch to the next available pool member after the failure threshold and switch back after recovery
+- Config validated with `sing-box check` before every manual reload
+- Web UI: searchable and paginated node list, paginated user list, node-pool editor, create a user directly from a node row, delete a node, one-click copy of proxy addresses
 - Docker deployment with data and the sing-box binary mounted as volumes
 
 ## Limitations
 
-- Exit IPs come from the subscription nodes. When a node dies or is replaced, the corresponding exit IP changes.
+- Exit IPs come from the subscription nodes. When the active node fails, StickyExit switches to another member of that user's pool, so the exit IP changes.
+- A user with an empty pool is omitted from the proxy configuration. If no active user has a usable pool, the proxy enters closed mode and rejects all traffic.
 - Stability depends on the proxy service you buy.
-- When a node fails, StickyExit migrates the users bound to it onto other healthy nodes.
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ python main.py
 
 Python 3.10 or newer. The Web UI listens on `5003` and the proxy port on `1080`.
 
-If the node pool is empty, only the Web UI starts. sing-box is launched automatically after you import nodes.
+If the node table is empty, only the Web UI starts. Import nodes and click "Reload sing-box" to launch the proxy.
 
 ### Frontend Development
 
@@ -93,14 +93,15 @@ npm run build   # outputs to web/static, served by the backend
 ## Usage
 
 1. Open the Web UI and import nodes (subscription URL / Clash YAML / node links).
-2. Create a user; StickyExit assigns a node that no other user currently holds.
+2. Create a user and configure its node pool. Plain "create user" starts with an empty pool; use the node-pool editor to choose and order nodes. "Add user" on a node row creates a single-member pool containing that node.
 3. Copy the proxy address shown on the page and hand it to that user.
+4. All changes are written to the database only; click "Reload sing-box" to apply them.
 
 ### Adding and Removing
 
-- Importing nodes **appends** to the pool. It does not overwrite existing nodes or change existing assignments.
-- Deleting a node automatically migrates the users bound to it to other healthy nodes.
-- Revoking a user invalidates the password immediately. Activating the user issues a brand new password; the old one is never restored.
+- Importing nodes **appends** to the node set. It does not overwrite existing nodes or change existing node pools.
+- Deleting a node removes it from every user pool, without substituting another node; a pool can become empty.
+- Revoking a user invalidates the password immediately. Activating the user keeps the existing node pool (an empty pool stays empty) and issues a brand new password; the old one is never restored.
 
 ## What Users Receive
 
@@ -126,18 +127,26 @@ Configuration comes from `.env` and can also be overridden by environment variab
 | `WEB_ADMIN_TOKEN` | empty | Admin token for the Web UI. Empty = no auth (use behind a reverse proxy or on a trusted network). When set, open the page with `?token=...`; every `/api/*` call must carry `?token=` or an `X-Admin-Token` header |
 | `ADVERTISE_IP` | empty | Host shown in the proxy address handed to users. When empty it is auto-detected: explicit `LISTEN_IP` > public IP > LAN IP. On a server with a public IP, set it explicitly |
 | `VERIFY_SSL` | `0` | Whether to verify TLS when fetching subscriptions. Proxy panels commonly use self-signed certificates, so verification is off by default |
-| `NODE_CHECK_TIMEOUT` | `5.0` | TCP probe timeout for node health checks, in seconds |
+| `NODE_CHECK_TIMEOUT` | `5.0` | TCP probe timeout for manual node checks, in seconds |
+| `HEALTH_INTERVAL` | `30` | Health probe interval for nodes in user pools, in seconds |
+| `FAIL_THRESHOLD` | `3` | Consecutive failures before falling back to the next available member |
+| `RECOVER_THRESHOLD` | `2` | Consecutive successes before switching back to a higher-priority node |
+| `HEALTH_PROBE_URL` | `http://www.gstatic.com/generate_204` | Health probe URL; must be reachable from the node side |
+| `HEALTH_PROBE_TIMEOUT` | `5.0` | Timeout for one health probe, in seconds |
+| `CLASH_API_HOST` | `127.0.0.1` | sing-box Clash API address; keep it bound to loopback |
+| `CLASH_API_PORT` | `9090` | sing-box Clash API port |
+| `CLASH_API_SECRET` | empty | sing-box Clash API secret |
 
 ## Web UI
 
 Open `http://SERVER_IP:5003`. From there you can:
 
 - import node sources (subscription URL / pasted Clash YAML / node links)
-- search and page through nodes (type, server, health, bound user count)
+- search and page through nodes (type, server, health, number of user pools containing the node)
 - create a user directly from a node row
-- delete a node (affected users are migrated)
+- delete a node
 - page through users and copy a proxy address with one click
-- create, revoke, reactivate, delete, re-password, or re-assign users
+- create, revoke, reactivate, delete, reset a password, or edit a user's node pool
 - reload sing-box with one click
 
 ## Layout
@@ -145,11 +154,11 @@ Open `http://SERVER_IP:5003`. From there you can:
 ```
 main.py           entry point: sing-box proxy + FastAPI Web app
 config.py         global config (.env loading, advertised IP detection)
-storage.py        SQLite data layer (nodes / users)
+storage.py        SQLite data layer (nodes / users / node pools)
 
 parser/           parse subscription URL / Clash YAML / base64 / node links -> node list
-converter/        build sing-box config from nodes + users, validate, supervise the process
-auth/             user creation, passwords, user-to-node assignment and failover
+converter/        build and supervise sing-box config from nodes + user pools, with runtime failover/recovery
+auth/             user creation, passwords, and node-pool management
 web/server.py     FastAPI routes + JSON API + static hosting for the frontend
 web/frontend/     Vue 3 + Tailwind CSS + Element Plus source
 web/static/       frontend build output (served by the backend at runtime)
@@ -157,7 +166,7 @@ lib/              sing-box binaries (Linux / Windows)
 data/             users.db / sing-box.json / sing-box.log
 ```
 
-Data flow: `parser` produces the node list, `auth` creates users and assigns nodes, `converter` emits the sing-box config, and `web` ties it together.
+Data flow: `parser` produces the node list, `auth` manages users and node pools, `converter` emits and supervises the sing-box config, runtime health probes handle failover and recovery, and `web` ties it together.
 
 ## Tech Stack
 
@@ -167,11 +176,11 @@ Data flow: `parser` produces the node list, `auth` creates users and assigns nod
 
 ## FAQ
 
-**What happens when there are more users than nodes?**
-The allocator reuses nodes. If you need strictly one node per user, cap the user count or import several subscriptions into the same pool.
+**What happens when the active node fails?**
+After the configured `FAIL_THRESHOLD` consecutive failures, runtime health checks use the Clash API to switch that user to the next available pool member. After the original node reaches `RECOVER_THRESHOLD` consecutive successes, StickyExit switches back automatically. This does not rewrite or reload the configuration file.
 
-**What happens when a node goes down?**
-When you reload or import nodes from the Web UI, users on the dead node are migrated to other healthy nodes.
+**Why is a newly created user's proxy not working?**
+A plain new user starts with an empty pool. Add at least one node in the node-pool editor, then click "Reload sing-box".
 
 **Can each user get a dedicated port or rate limit?**
 Edit `converter/configgen.py`: give each user a mixed inbound with its own port. It is still a single process.
@@ -188,7 +197,7 @@ Fetches go out directly over httpx (async). Proxy panels commonly use self-signe
 ## Security
 
 1. Never hand the raw subscription to users. They only get username, password, IP, and port.
-2. Once any user exists, authentication is enforced; unauthenticated requests get 407.
+2. Authentication is enforced whenever at least one active user has a usable pool. With no routable users, the proxy enters closed mode and rejects all traffic.
 3. Open only `1080` in the firewall. Do not expose `5003` publicly; if you must, set `WEB_ADMIN_TOKEN` and put it behind a reverse proxy with TLS.
 4. Watch the logs for authentication failures to catch password abuse.
 

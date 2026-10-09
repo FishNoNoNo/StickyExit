@@ -122,8 +122,8 @@ class Supervisor:
     def _wait_until_serving(self, proc: subprocess.Popen, timeout: float) -> None:
         """确认新实例真的在服务：进程没退出 + 端口在听。
 
-        两者缺一都算失败。之前不检查这一步，于是 "bind: address already
-        in use" 这种秒退的失败会被当成成功返回，停用因此失效。
+        两者缺一都算失败：漏判会让 "bind: address already in use" 这种秒退的
+        失败被当成成功返回，停用因此失效。
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
