@@ -52,10 +52,19 @@ async def _fetch_text(url: str, timeout: int = 45) -> str:
 
 
 def _maybe_decode_b64(text: str) -> str:
-    """订阅内容若是 base64 则解码成明文链接列表。"""
+    """订阅内容若是 base64 则解码成明文链接列表。
+
+    机场面板常按 76 列折行输出 base64，所以"含 \\n"不再等于"不是 base64"：
+    只有看到 Clash YAML 的明确特征（proxies:）才原样返回，其余情况仍然
+    尝试按 base64 解码；解不出来再退回原文本（普通链接列表 / 错误内容）。
+    """
     t = text.strip()
-    if not t or "\n" in t[:4000] or "proxies:" in t[:4000]:
-        return t  # 已经是 YAML 或普通文本
+    if not t:
+        return t
+    if "proxies:" in t[:4000]:
+        return t  # 明显的 Clash YAML（解码尝试会失败，且会破坏缩进）
+    # 去掉全部空白（含折行的换行）后按 base64 试解；plain URL 列表含 "://"，
+    # 去掉空白后必然带着冒号，过不了下面的字符集检查 -> 原样返回，行为不变。
     candidate = re.sub(r"\s+", "", t)
     if len(candidate) < 16 or not re.fullmatch(r"[A-Za-z0-9+/=\-_]*", candidate):
         return t
