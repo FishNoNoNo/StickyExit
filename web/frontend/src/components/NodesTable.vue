@@ -96,7 +96,7 @@ async function onDeleteNode(tag: string, name: string, users: number) {
     const d = await deleteNode(tag);
     let msg = "已删除节点 " + tag;
     if (d.migrated && d.migrated.length) msg += "，迁移用户 " + d.migrated.length + " 个";
-    ElMessage.success(msg);
+    ElMessage.success(msg + "；重载后生效");
     if (d.doomed && d.doomed.length) {
       ElMessage.warning("以下用户没有可用节点：" + d.doomed.join("、"));
     }

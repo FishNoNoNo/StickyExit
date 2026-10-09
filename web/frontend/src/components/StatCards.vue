@@ -15,6 +15,12 @@ const cards = computed(() => {
       value: s ? (s.sing_box_alive ? "运行中" : "未运行") : "-",
       tone: s ? (s.sing_box_alive ? "text-ok" : "text-bad") : "",
     },
+    {
+      key: "config",
+      label: "配置",
+      value: s ? (s.config_dirty ? "待重载" : (s.sing_box_alive ? "已生效" : "-")) : "-",
+      tone: s && s.config_dirty ? "text-bad" : "",
+    },
     { key: "listen", label: "监听", value: s ? s.listen : "-", tone: "", small: true },
   ];
 });

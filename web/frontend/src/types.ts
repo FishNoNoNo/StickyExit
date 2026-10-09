@@ -7,6 +7,8 @@ export interface Status {
   revoked_users: number;
   sing_box_alive: boolean;
   locked?: boolean;
+  /** 手动重载模式下：数据库/磁盘与运行中的实例不一致（提示"配置未生效"） */
+  config_dirty?: boolean;
 }
 
 export interface NodeRow {
@@ -54,4 +56,6 @@ export interface ImportResult {
   updated: number;
   /** 被 sing-box 判定无法使用、未入库存的节点名（列表页"导入前就已剔除"） */
   skipped?: string[];
+  /** 手动重载模式下：这次改动未生效，等手动点"重载" */
+  pending_reload?: boolean;
 }

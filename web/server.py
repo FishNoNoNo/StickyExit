@@ -30,6 +30,7 @@ from auth.allocator import check_all_and_mark
 from converter import (
     Supervisor, SupervisorError, drop_invalid_nodes, generate_and_validate,
 )
+from converter.supervisor import _file_digest
 from parser import (
     clash_node_to_outbound, fetch_nodes, normalize_outbound,
     parse_clash_yaml, parse_plain_links,
@@ -100,6 +101,13 @@ def _error(message: str, status: int = 500) -> JSONResponse:
 def create_app(db: DB | None = None) -> FastAPI:
     app = FastAPI(title="StickyExit", docs_url=None, redoc_url=None, openapi_url=None)
 
+    def _cfg_needs_reload() -> bool:
+        """磁盘配置是否与运行中的实例不一致（提示"配置未生效"）。"""
+        try:
+            return Supervisor()._running_digest() != _file_digest(config.CONFIG_PATH)
+        except Exception:
+            return False
+
     state = {"db": db}
 
     def get_db() -> DB:
@@ -163,6 +171,8 @@ def create_app(db: DB | None = None) -> FastAPI:
             "users": active_total,
             "revoked_users": revoked_total,
             "sing_box_alive": alive,
+            # 手动重载模式：数据库/磁盘与运行实例不一致时，页面提示"配置未生效"。
+            "config_dirty": not alive or _cfg_needs_reload(),
         }
         if alive:
             # 代理在跑但配置里一个 active 用户都没有 = 封闭模式，
@@ -207,15 +217,15 @@ def create_app(db: DB | None = None) -> FastAPI:
             try:
                 _db = get_db()
                 # 增量合并：已有 tag 更新，新 tag 追加，绝不清空已有节点。
-                added, updated = _db.add_nodes(nodes)
                 # 添加节点不会删除任何旧节点，已有用户的绑定不受影响，
                 # 所以这里不需要（更不应该）重新分配用户节点。
-                # 生成配置 + 校验 + 重启
-                cfg = generate_and_validate(_db)
-                Supervisor().reload(cfg)
+                # 注意：只入库，不重载。运行中的 sing-box 还是旧配置，
+                # 手动点"重载"后才生效。
+                added, updated = _db.add_nodes(nodes)
                 return _json({
                     "ok": True, "count": len(nodes), "added": added, "updated": updated,
                     "skipped": [n.get("name", n["tag"]) for n in invalid],
+                    "pending_reload": True,
                 })
             except Exception as e:
                 logger.exception("导入节点失败")
@@ -271,8 +281,7 @@ def create_app(db: DB | None = None) -> FastAPI:
     async def api_node_delete(tag: str):
         """删除节点：绑在它上面的用户自动迁移到其他节点。
 
-        节点消失后必须重新生成配置并重启成功才算删完，否则页面上看到的
-        状态和正在跑的代理会不一致。
+        删除已入库（含迁移），运行中的 sing-box 在手动"重载"后才会更新。
         """
         _db = get_db()
         tag = tag.strip()
@@ -284,14 +293,11 @@ def create_app(db: DB | None = None) -> FastAPI:
             # 用户主动触发的显式动作，不属于自动迁移。
             from auth.allocator import ensure_all_users_have_node
             changed, doomed = ensure_all_users_have_node(_db, _db.get_nodes())
-            try:
-                _apply(_db, f"删除节点 {tag}")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
             return _json({
                 "ok": True, "tag": tag,
                 "migrated": [u["username"] for u in changed],
                 "doomed": doomed,
+                "pending_reload": True,
             })
 
     # ---------- 用户 ----------
@@ -331,10 +337,6 @@ def create_app(db: DB | None = None) -> FastAPI:
                 user = create_user(_db, username, _db.get_nodes(), prefer=prefer)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
-            try:
-                _apply(_db, f"创建用户 {username}")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
             return _json({
                 "ok": True,
                 "user": {
@@ -342,6 +344,7 @@ def create_app(db: DB | None = None) -> FastAPI:
                     "node_tag": user["node_tag"],
                     "proxy": proxy_endpoint(user, advertise_ip, config.LISTEN_PORT),
                 },
+                "pending_reload": True,
             })
 
     @app.post("/api/users/{username}/revoke")
@@ -354,16 +357,15 @@ def create_app(db: DB | None = None) -> FastAPI:
         with _lock:
             if not _db.get_user(username):
                 return _json({"ok": False, "error": "用户不存在"}, 404)
-            if revoke(_db, username):
-                try:
-                    _apply(_db, f"停用用户 {username}")
-                except ConfigApplyError as e:
-                    return _json({"ok": False, "error": str(e)}, 500)
+            # 只入库，不重载：停用也会立刻作废口令（revoke 已做）。
+            # 运行中的 sing-box 还是旧配置，手动点"重载"后旧进程消失。
+            revoke(_db, username)
             return _json({
                 "ok": True,
                 "username": username,
                 "status": "revoked",
                 "changed": True,
+                "pending_reload": True,
             })
 
     @app.post("/api/users/{username}/activate")
@@ -376,10 +378,6 @@ def create_app(db: DB | None = None) -> FastAPI:
                 user = activate(_db, username)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
-            try:
-                _apply(_db, f"恢复用户 {username}")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
             return _json({
                 "ok": True,
                 "user": {
@@ -387,6 +385,7 @@ def create_app(db: DB | None = None) -> FastAPI:
                     "node_tag": user["node_tag"],
                     "proxy": proxy_endpoint(user, advertise_ip, config.LISTEN_PORT),
                 },
+                "pending_reload": True,
             })
 
     @app.post("/api/users/{username}/delete")
@@ -395,13 +394,9 @@ def create_app(db: DB | None = None) -> FastAPI:
         with _lock:
             if not _db.get_user(username):
                 return _json({"ok": False, "error": "用户不存在"}, 404)
-            if not delete_user(_db, username):
-                return _json({"ok": False, "error": "删除失败"}, 404)
-            try:
-                _apply(_db, f"删除用户 {username}")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
-            return _json({"ok": True})
+            # 只入库，不重载：手动点"重载"后新配置（不含该用户）才生效。
+            delete_user(_db, username)
+            return _json({"ok": True, "pending_reload": True})
 
     @app.post("/api/users/{username}/password")
     async def api_user_password(username: str, request: Request):
@@ -417,15 +412,12 @@ def create_app(db: DB | None = None) -> FastAPI:
                 pw = reset_password(_db, username, body.get("password"))
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
-            try:
-                _apply(_db, f"重置用户 {username} 口令")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
             u = _db.get_user(username)
             return _json({
                 "ok": True,
                 "password": pw,
                 "proxy": proxy_endpoint(u, advertise_ip, config.LISTEN_PORT) if u else "",
+                "pending_reload": True,
             })
 
     @app.post("/api/users/{username}/switch")
@@ -441,12 +433,9 @@ def create_app(db: DB | None = None) -> FastAPI:
                 return _json({"ok": False, "error": "用户不存在"}, 404)
             if not _db.get_node(tag):
                 return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
+            # 只入库，不重载：手动点"重载"后新路由才生效。
             _db.set_user_node(username, tag)
-            try:
-                _apply(_db, f"切换用户 {username} 节点")
-            except ConfigApplyError as e:
-                return _json({"ok": False, "error": str(e)}, 500)
-            return _json({"ok": True})
+            return _json({"ok": True, "pending_reload": True})
 
     # ---------- 重载 ----------
     @app.post("/api/reload")

@@ -58,9 +58,10 @@ async function onCreate() {
     const u = await createUser(username);
     ElMessage.success({
       message: multiline(
-        "已创建 " + u.username + "，节点 " + u.node_tag + "\n代理: " + u.proxy,
+        "已创建 " + u.username + "，节点 " + u.node_tag + "\n代理: " + u.proxy +
+        "\n注意：配置需手动点\"重载\"后才能生效",
       ),
-      duration: 6000,
+      duration: 8000,
     });
     newUser.value = "";
   } catch (e) {
@@ -82,7 +83,7 @@ async function onRevoke(name: string) {
   }
   try {
     await revokeUser(name);
-    ElMessage.success("已停用 " + name + "，其凭据已作废");
+    ElMessage.success("已停用 " + name + "，其凭据已作废；重载后配置正式生效");
   } catch (e) {
     ElMessage.error("停用失败: " + (e as Error).message);
   }
@@ -101,8 +102,9 @@ async function onActivate(name: string) {
   try {
     const u = await activateUser(name);
     ElMessage.success({
-      message: multiline("已恢复 " + name + "\n节点 " + u.node_tag + "\n" + u.proxy),
-      duration: 6000,
+      message: multiline("已恢复 " + name + "\n节点 " + u.node_tag + "\n" + u.proxy +
+        "\n注意：配置需手动点\"重载\"后才能生效"),
+      duration: 8000,
     });
   } catch (e) {
     ElMessage.error("恢复失败: " + (e as Error).message);
@@ -146,8 +148,9 @@ async function onResetPassword(name: string) {
   try {
     const d = await resetPassword(name, pw);
     ElMessage.success({
-      message: multiline(name + " 新口令: " + d.password + "\n" + d.proxy),
-      duration: 8000,
+      message: multiline(name + " 新口令: " + d.password + "\n" + d.proxy +
+        "\n注意：需手动点\"重载\"后新口令才在服务端生效"),
+      duration: 10000,
     });
   } catch (e) {
     ElMessage.error("改密失败: " + (e as Error).message);
@@ -169,7 +172,8 @@ async function onConfirmSwitch() {
   switching.value = true;
   try {
     await switchNode(switchUser.value, switchTarget.value);
-    ElMessage.success(switchUser.value + " 已切换到 " + switchTarget.value);
+    ElMessage.success(switchUser.value + " 已切换到 " + switchTarget.value +
+      "；重载后生效");
     switchDialog.value = false;
   } catch (e) {
     ElMessage.error("切换失败: " + (e as Error).message);
