@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { h, ref, watch } from "vue";
-import { Delete, Search, User } from "@element-plus/icons-vue";
+import { Delete, Edit, Search, User } from "@element-plus/icons-vue";
 import {
   checkNodes,
   createUser,
@@ -11,6 +11,7 @@ import {
   nodeSearch,
   nodes,
   nodesTotal,
+  updateNode,
 } from "../store";
 
 /** 快捷加用户：目标节点 + 输入的用户名。 */
@@ -21,6 +22,12 @@ const username = ref("");
 const creating = ref(false);
 const deleting = ref("");
 const checking = ref(false);
+
+/** 改节点显示名：name 与 tag 解耦，改名不产生新节点、也不需要重载。 */
+const editVisible = ref(false);
+const editTag = ref("");
+const editName = ref("");
+const savingEdit = ref(false);
 
 // 搜索框：输入时防抖 300ms 再查，回车立即查。过滤在后端做，只拉当前页。
 const keyword = ref(nodeSearch.value);
@@ -108,6 +115,30 @@ async function onDeleteNode(tag: string, name: string, users: number) {
   }
 }
 
+function openEdit(tag: string, name: string) {
+  editTag.value = tag;
+  editName.value = name;
+  editVisible.value = true;
+}
+
+async function onConfirmEdit() {
+  const name = editName.value.trim();
+  if (!name) {
+    ElMessage.warning("名称不能为空");
+    return;
+  }
+  savingEdit.value = true;
+  try {
+    await updateNode(editTag.value, name);
+    ElMessage.success("已更新节点名称");
+    editVisible.value = false;
+  } catch (e) {
+    ElMessage.error("保存失败: " + (e as Error).message);
+  } finally {
+    savingEdit.value = false;
+  }
+}
+
 async function onPageChange(page: number) {
   await loadNodes(page, nodePageSize.value);
 }
@@ -190,7 +221,7 @@ async function onCheckAll() {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200">
+      <el-table-column label="操作" width="290">
         <template #default="{ row }">
           <div class="ops flex flex-wrap gap-1.5">
             <el-button
@@ -201,6 +232,14 @@ async function onCheckAll() {
               @click="openAddUser(row.tag, row.name)"
             >
               加用户
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              :icon="Edit"
+              @click="openEdit(row.tag, row.name)"
+            >
+              编辑
             </el-button>
             <el-button
               type="danger"
@@ -245,6 +284,26 @@ async function onCheckAll() {
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="onConfirmAddUser">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="editVisible" title="编辑节点名称" width="460px">
+      <p class="m-0 mb-3 text-sm text-muted">
+        tag: <code>{{ editTag }}</code>
+        <br />
+        名称与 tag 解耦：改名只影响展示，不会产生新节点，也不需要重载 sing-box。
+      </p>
+      <el-input
+        v-model="editName"
+        placeholder="输入节点名称"
+        maxlength="200"
+        show-word-limit
+        clearable
+        @keyup.enter="onConfirmEdit"
+      />
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingEdit" @click="onConfirmEdit">保存</el-button>
       </template>
     </el-dialog>
   </section>

@@ -153,6 +153,12 @@ export async function deleteNode(tag: string): Promise<{ removed_from: string[] 
   return d;
 }
 
+/** 改节点的显示名。tag 与名称解耦，改名不动 tag、不需要重载 sing-box。 */
+export async function updateNode(tag: string, name: string): Promise<void> {
+  await postJSON("/api/nodes/" + encodeURIComponent(tag) + "/update", { name });
+  await Promise.all([refreshNodes(), loadNodeOptions(), refreshUsers()]);
+}
+
 export async function revokeUser(username: string): Promise<void> {
   await post("/api/users/" + encodeURIComponent(username) + "/revoke");
   await Promise.all([loadStatus(), refreshUsers(), refreshNodes()]);

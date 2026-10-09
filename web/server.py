@@ -33,7 +33,7 @@ from converter import (
 from converter.configgen import GROUP_PREFIX
 from converter.supervisor import _file_digest
 from parser import (
-    clash_node_to_outbound, fetch_nodes, normalize_outbound,
+    clash_node_to_outbound, fetch_nodes, link_name, normalize_outbound,
     parse_clash_yaml, parse_plain_links, url_to_outbound,
 )
 from storage import DB
@@ -301,6 +301,27 @@ def create_app(db: DB | None = None) -> FastAPI:
                 "pending_reload": True,
             })
 
+    @app.post("/api/nodes/{tag:path}/update")
+    async def api_node_update(tag: str, request: Request):
+        """给节点改显示名。
+
+        name 与 tag 解耦（tag 只由连接参数决定），所以改名不进 sing-box
+        配置、不需要重载：节点列表 / 用户节点池读的都是库里的 name。
+        """
+        _db = get_db()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = str(body.get("name") or "").strip()[:200]
+        if not name:
+            return _json({"ok": False, "error": "名称不能为空"}, 400)
+        tag = tag.strip()
+        with _lock:
+            if not _db.set_node_name(tag, name):
+                return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
+        return _json({"ok": True, "tag": tag, "name": name})
+
     # ---------- 用户 ----------
     @app.get("/api/users")
     async def api_users_get(page: int = 1, page_size: int = 20):
@@ -527,7 +548,8 @@ def _nodes_from_text(text: str) -> list:
     else:
         for u in parse_plain_links(text):
             try:
-                node = normalize_outbound(url_to_outbound(u), u)
+                out = url_to_outbound(u)
+                node = normalize_outbound(out, link_name(u, out))
             except Exception as e:
                 print("skip", u[:40], e)
                 continue
