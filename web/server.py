@@ -4,7 +4,7 @@
 职责边界：页面/接口只编排 storage / auth / converter 三个模块，
 自己不实现核心逻辑。所有变更都遵循同一条铁律：
 
-    改数据库 -> 生成配置 -> sing-box check -> 真正重启成功 -> 才返回成功
+    改数据库 -> 刷新「待同步配置」-> 手动重载 -> sing-box check -> 真正重启成功
 
 重启失败必须返回错误并说明代理当前是停着的，绝不能"数据库改了就说成功"。
 
@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import threading
 
@@ -28,10 +29,9 @@ from auth import (
 from auth.allocator import check_all_and_mark
 from converter import (
     Supervisor, SupervisorError, clashapi, health,
-    drop_invalid_nodes, generate_and_validate,
+    drop_invalid_nodes,
 )
-from converter.configgen import GROUP_PREFIX
-from converter.supervisor import _file_digest
+from converter.configgen import GROUP_PREFIX, write_pending_from_db
 from parser import (
     clash_node_to_outbound, fetch_nodes, link_name, normalize_outbound,
     parse_clash_yaml, parse_plain_links, url_to_outbound,
@@ -47,8 +47,25 @@ class ConfigApplyError(RuntimeError):
     """配置没能落到正在跑的 sing-box 上。"""
 
 
+class PendingSyncError(RuntimeError):
+    """数据库改动没能同步到「待同步配置」，外层事务会回滚数据库。"""
+
+
+def _pending_config(db: DB) -> dict:
+    """取「待同步配置」：正常直接读 pending 文件，缺失/损坏才按 DB 重建。
+
+    常态下每个会改配置的接口都已经把 pending 写好了；这里的重建只是兜底，
+    避免升级 / 误删文件之后重载直接失败。
+    """
+    try:
+        return json.loads(config.CONFIG_PENDING_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("待同步配置缺失或损坏，按数据库重建")
+        return write_pending_from_db(db)
+
+
 def _apply(db: DB, action: str) -> dict:
-    """把数据库当前状态应用到 sing-box：生成 -> 校验 -> 重启。
+    """把「待同步配置」应用到 sing-box：校验 -> 写 sing-box.json -> 重启。
 
     成功返回 {"ok": True}，失败抛 ConfigApplyError。调用方应据此回 5xx，
     因为此时"数据库里的改动"与"实际生效状态"可能已经不一致，
@@ -57,9 +74,9 @@ def _apply(db: DB, action: str) -> dict:
     健康探测不在这里触发：手动点"检测节点"时才探测（全量，并发）。
     """
     try:
-        cfg = generate_and_validate(db)
+        cfg = _pending_config(db)
     except Exception as e:
-        raise ConfigApplyError(f"配置生成/校验失败: {e}") from e
+        raise ConfigApplyError(f"待同步配置不可用: {e}") from e
     try:
         # 和健康探测互斥：别让一次切换请求打到正在重启的 sing-box 上。
         with health.cycle_lock():
@@ -104,12 +121,18 @@ def _error(message: str, status: int = 500) -> JSONResponse:
 def create_app(db: DB | None = None) -> FastAPI:
     app = FastAPI(title="StickyExit", docs_url=None, redoc_url=None, openapi_url=None)
 
-    def _cfg_needs_reload() -> bool:
-        """磁盘配置是否与运行中的实例不一致（提示"配置未生效"）。"""
+    def _config_dirty() -> bool:
+        """「待同步配置」与已应用的配置是否不一致（页面提示「待重载」）。
+
+        只比这两份文件：运行中的 sing-box 到底跑的是哪一份不重要 —— 点重载
+        一定会重启它；这里要回答的是"库里改过、还没点重载"。
+        """
         try:
-            return Supervisor()._running_digest() != _file_digest(config.CONFIG_PATH)
-        except Exception:
-            return False
+            pending = json.loads(config.CONFIG_PENDING_PATH.read_text(encoding="utf-8"))
+            applied = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True  # 读不到 / 坏文件：保守地认为需要重载
+        return pending != applied
 
     state = {"db": db}
 
@@ -117,6 +140,20 @@ def create_app(db: DB | None = None) -> FastAPI:
         if state["db"] is None:
             state["db"] = DB()
         return state["db"]
+
+    def _sync_pending(db: DB) -> None:
+        """数据库改完后立刻刷新「待同步配置」；失败必须让外层事务回滚。"""
+        try:
+            write_pending_from_db(db)
+        except Exception as e:
+            logger.exception("待同步配置写入失败")
+            raise PendingSyncError(
+                f"待同步配置写入失败，数据库改动已回滚：{e}"
+            ) from e
+
+    @app.exception_handler(PendingSyncError)
+    async def _pending_sync_error(request: Request, exc: PendingSyncError):
+        return _error(str(exc), 500)
 
     # ---------- 认证：全部 /api/* 统一加 token 校验 ----------
     @app.middleware("http")
@@ -174,8 +211,8 @@ def create_app(db: DB | None = None) -> FastAPI:
             "users": active_total,
             "revoked_users": revoked_total,
             "sing_box_alive": alive,
-            # 手动重载模式：数据库/磁盘与运行实例不一致时，页面提示"配置未生效"。
-            "config_dirty": not alive or _cfg_needs_reload(),
+            # 手动重载模式：「待同步配置」与已应用配置不一致时提示「待重载」。
+            "config_dirty": not alive or _config_dirty(),
         }
         if alive:
             # 代理在跑但配置里一个 active 用户都没有 = 封闭模式，
@@ -224,7 +261,9 @@ def create_app(db: DB | None = None) -> FastAPI:
                 # 所以这里不需要（更不应该）重写用户节点池。
                 # 注意：只入库，不重载。运行中的 sing-box 还是旧配置，
                 # 手动点"重载"后才生效。
-                added, updated = _db.add_nodes(nodes)
+                with _db.transaction():
+                    added, updated = _db.add_nodes(nodes)
+                    _sync_pending(_db)
                 return _json({
                     "ok": True, "count": len(nodes), "added": added, "updated": updated,
                     "skipped": [n.get("name", n["tag"]) for n in invalid],
@@ -294,7 +333,9 @@ def create_app(db: DB | None = None) -> FastAPI:
         with _lock:
             if not _db.get_node(tag):
                 return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
-            _, affected = _db.delete_node(tag)
+            with _db.transaction():
+                _, affected = _db.delete_node(tag)
+                _sync_pending(_db)
             return _json({
                 "ok": True, "tag": tag,
                 "removed_from": affected,
@@ -320,6 +361,7 @@ def create_app(db: DB | None = None) -> FastAPI:
         with _lock:
             if not _db.set_node_name(tag, name):
                 return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
+            # 改名不改变配置内容（name 不进 sing-box 配置），无需刷新待同步配置。
         return _json({"ok": True, "tag": tag, "name": name})
 
     # ---------- 用户 ----------
@@ -378,7 +420,9 @@ def create_app(db: DB | None = None) -> FastAPI:
         advertise_ip = await config.get_advertise_ip()
         with _lock:
             try:
-                user = create_user(_db, username, prefer=prefer)
+                with _db.transaction():
+                    user = create_user(_db, username, prefer=prefer)
+                    _sync_pending(_db)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
             return _json({
@@ -403,7 +447,9 @@ def create_app(db: DB | None = None) -> FastAPI:
                 return _json({"ok": False, "error": "用户不存在"}, 404)
             # 只入库，不重载：停用也会立刻作废口令（revoke 已做）。
             # 运行中的 sing-box 还是旧配置，手动点"重载"后旧进程消失。
-            revoke(_db, username)
+            with _db.transaction():
+                revoke(_db, username)
+                _sync_pending(_db)
             return _json({
                 "ok": True,
                 "username": username,
@@ -419,7 +465,9 @@ def create_app(db: DB | None = None) -> FastAPI:
         advertise_ip = await config.get_advertise_ip()
         with _lock:
             try:
-                user = activate(_db, username)
+                with _db.transaction():
+                    user = activate(_db, username)
+                    _sync_pending(_db)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
             return _json({
@@ -440,7 +488,9 @@ def create_app(db: DB | None = None) -> FastAPI:
             if not _db.get_user(username):
                 return _json({"ok": False, "error": "用户不存在"}, 404)
             # 只入库，不重载：手动点"重载"后新配置（不含该用户）才生效。
-            delete_user(_db, username)
+            with _db.transaction():
+                delete_user(_db, username)
+                _sync_pending(_db)
             return _json({"ok": True, "pending_reload": True})
 
     @app.post("/api/users/{username}/password")
@@ -454,7 +504,9 @@ def create_app(db: DB | None = None) -> FastAPI:
         advertise_ip = await config.get_advertise_ip()
         with _lock:
             try:
-                pw = reset_password(_db, username, body.get("password"))
+                with _db.transaction():
+                    pw = reset_password(_db, username, body.get("password"))
+                    _sync_pending(_db)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
             u = _db.get_user(username)
@@ -494,7 +546,9 @@ def create_app(db: DB | None = None) -> FastAPI:
             for t in ordered:
                 if not _db.get_node(t):
                     return _json({"ok": False, "error": f"节点 {t} 不存在"}, 404)
-            _db.set_user_nodes(username, ordered)
+            with _db.transaction():
+                _db.set_user_nodes(username, ordered)
+                _sync_pending(_db)
             # 只入库，不重载：手动点"重载"后新的优先级才生效。
             return _json({"ok": True, "tags": ordered, "pending_reload": True})
 

@@ -53,6 +53,10 @@ PIDFILE_PATH = DATA_DIR / "sing-box.pid"
 # python 被强杀后它会被孤儿化并继续用旧配置服务，光看"端口在听"看不出来。
 CONFIG_HASH_PATH = DATA_DIR / "sing-box.sha"
 
+# 「待同步配置」：数据库每变一次就重新渲染到这里；点「重载」时把它写成
+# CONFIG_PATH 并重启 sing-box。两者内容不一致 => 页面提示「待重载」。
+CONFIG_PENDING_PATH = DATA_DIR / "sing-box.pending.json"
+
 # 对外代理监听：0.0.0.0 = 所有网卡；只有一台机器就填本机内网/公网 IP 更稳
 LISTEN_IP = os.environ.get("LISTEN_IP", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "1080"))

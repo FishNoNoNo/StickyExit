@@ -25,7 +25,7 @@ Each user only needs `username:password@server-ip:1080`. HTTP and SOCKS5 share t
 - Node import from subscription URL, Clash YAML, base64, or plain node links (one per line: `socks5://`, `http://`, `vmess://`, `vless://`, `ss://`, `trojan://`, `hy2://`, `tuic://`, ...). Import appends to the pool instead of replacing it
 - SQLite persistence for nodes, users, and node pools; configuration survives restarts
 - Node health checks with runtime failover and recovery: prefer Clash API delay probes, fall back to TCP; switch to the next available pool member after the failure threshold and switch back after recovery
-- Config validated with `sing-box check` before every manual reload
+- Every change is rendered to a pending config file in the same DB transaction; `sing-box check` validates it before each manual reload
 - Web UI: searchable and paginated node list, paginated user list, node-pool editor, create a user directly from a node row, delete a node, one-click copy of proxy addresses
 - Docker deployment with data and the sing-box binary mounted as volumes
 
@@ -95,7 +95,7 @@ npm run build   # outputs to web/static, served by the backend
 1. Open the Web UI and import nodes (subscription URL / Clash YAML / node links).
 2. Create a user and configure its node pool. Plain "create user" starts with an empty pool; use the node-pool editor to choose and order nodes. "Add user" on a node row creates a single-member pool containing that node.
 3. Copy the proxy address shown on the page and hand it to that user.
-4. All changes are written to the database only; click "Reload sing-box" to apply them.
+4. Every change is committed to the database together with a freshly rendered pending config; click "Reload sing-box" to validate and apply it.
 
 ### Adding and Removing
 
@@ -186,7 +186,7 @@ web/server.py     FastAPI routes + JSON API + static hosting for the frontend
 web/frontend/     Vue 3 + Tailwind CSS + Element Plus source
 web/static/       frontend build output (served by the backend at runtime)
 lib/              sing-box binaries (Linux / Windows)
-data/             users.db / sing-box.json / sing-box.log
+data/             users.db / sing-box.json / sing-box.pending.json / sing-box.log
 ```
 
 Data flow: `parser` produces the node list, `auth` manages users and node pools, `converter` emits and supervises the sing-box config, runtime health probes handle failover and recovery, and `web` ties it together.

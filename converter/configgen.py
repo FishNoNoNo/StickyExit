@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+from pathlib import Path
 from typing import Iterable
 
 import config
@@ -184,21 +187,59 @@ def drop_invalid_nodes(nodes: list[dict]) -> tuple[list[dict], list[dict]]:
     return good, bad
 
 
+def serialize(cfg: dict) -> str:
+    """配置的唯一序列化方式。
+
+    写盘和「待同步配置」都走它，两份文件的内容才严格一致 —— 页面的
+    「待重载」判定依赖这个一致性。
+    """
+    return json.dumps(cfg, ensure_ascii=False, indent=2)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """先写同目录临时文件再原子替换：中断也不会留下半截 JSON。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_config(cfg: dict, path=config.CONFIG_PATH) -> None:
-    path.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _atomic_write_text(path, serialize(cfg))
+
+
+def build_from_db(db: DB) -> dict:
+    """数据库当前状态对应的完整配置（不校验、不落盘）。"""
+    return build_config(db.list_users(active_only=True), db.get_nodes())
+
+
+def write_pending_from_db(db: DB) -> dict:
+    """把数据库当前状态渲染成「待同步配置」。
+
+    每个会改变配置的接口改完库后都必须调用；失败要往上抛，否则页面会把
+    「库里已改、还没重载」误判成「已生效」。
+    """
+    cfg = build_from_db(db)
+    write_config(cfg, config.CONFIG_PENDING_PATH)
+    return cfg
 
 
 def generate_and_validate(db: DB) -> dict:
     """从 DB 组装完整配置 -> sing-box check 校验 -> 写入磁盘。
 
-    任何一步失败都抛异常，调用方负责决定是否回滚到旧配置。
+    任何一步失败都抛异常，调用方负责决定是否回滚到旧配置。启动路径用它：
+    应用用的配置和「待同步配置」一起落盘，两者天然一致。
     """
-    nodes = db.get_nodes()
-    users = db.list_users(active_only=True)
-    cfg = build_config(users, nodes)
+    cfg = build_from_db(db)
     core.validate(cfg)
     write_config(cfg)
+    write_config(cfg, config.CONFIG_PENDING_PATH)
     return cfg

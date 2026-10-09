@@ -25,7 +25,7 @@
 - 节点导入支持订阅链接、Clash YAML、base64、节点链接（每行一条：`socks5://` `http://` `vmess://` `vless://` `ss://` `trojan://` `hy2://` `tuic://` 等），导入为追加而非覆盖
 - SQLite 持久化节点、用户与节点池，重启后保留配置
 - 节点健康检查与运行时降级/回切：优先用 Clash API 延迟探测，接口不可用时退回 TCP 拨测；连续失败达阈值后切到池内下一个可用节点，恢复后自动回切
-- 配置先经 `sing-box check` 校验，手动重载时重启进程使配置生效
+- 每次改动都在同一个数据库事务里渲染出「待同步配置」；手动重载时先经 `sing-box check` 校验，再重启进程生效
 - Web 管理页：节点分页与搜索、重命名节点、用户分页、编辑用户节点池、节点上快捷建号、删除节点、一键复制代理地址
 - Docker 部署，数据与 sing-box 二进制通过 volume 挂载
 
@@ -94,7 +94,7 @@ npm run build   # 构建产物输出到 web/static，由后端托管
 1. 打开 Web 管理页，导入节点（订阅链接 / Clash YAML / 节点链接）。
 2. 新建用户并配置节点池：普通“建用户”默认空池；在“节点池”编辑器里选择并排序节点。节点行上的“加用户”会创建只含该节点的单成员池。
 3. 复制页面上的代理地址，发给对应用户。
-4. 所有改动只写入数据库；确认后点“重载 sing-box”使配置生效。
+4. 每次改动都会连同「待同步配置」一起提交到数据库；确认后点“重载 sing-box”校验并生效。
 
 ### 节点与用户的增删
 
@@ -181,7 +181,7 @@ web/server.py     FastAPI 路由 + JSON API + 前端静态托管
 web/frontend/     Vue 3 + Tailwind CSS + Element Plus 源码
 web/static/       前端构建产物（运行时由后端托管）
 lib/              sing-box 二进制（Linux / Windows）
-data/             users.db / sing-box.json / sing-box.log
+data/             users.db / sing-box.json / sing-box.pending.json / sing-box.log
 ```
 
 数据流：`parser` 得到节点列表，`auth` 管理用户与节点池，`converter` 输出并守护 sing-box 配置，运行时由健康探测完成降级/回切，`web` 统一管理。

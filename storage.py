@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 import secrets
 import sqlite3
 import threading
@@ -36,13 +37,14 @@ class DB:
     def __init__(self, path=config.DB_PATH):
         self.path = str(path)
         self._lock = threading.RLock()
+        self._tx_depth = 0
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     def _init_schema(self):
-        with self._lock, self._conn:
+        with self._write():
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS nodes (
@@ -118,7 +120,7 @@ class DB:
         if not rows:
             return
         moved = 0
-        with self._lock, self._conn:
+        with self._write():
             for old_tag, outbound_json in rows:
                 try:
                     out = json.loads(outbound_json)
@@ -159,6 +161,39 @@ class DB:
         with self._lock:
             self._conn.close()
 
+    @contextmanager
+    def transaction(self):
+        """让一次数据库改动与「待同步配置」写入共用一个事务边界。
+
+        写入待同步配置失败时，调用方抛异常走到这里，数据库改动会一起回滚；
+        这样不会留下「库里已经改完、pending 还是旧内容」的中间态。
+        """
+        with self._lock:
+            if self._tx_depth:
+                yield self
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._tx_depth = 1
+            try:
+                yield self
+            except BaseException:
+                self._tx_depth = 0
+                self._conn.rollback()
+                raise
+            else:
+                self._tx_depth = 0
+                self._conn.commit()
+
+    @contextmanager
+    def _write(self):
+        """写操作的提交边界：外层有 transaction 时不自行提交。"""
+        with self._lock:
+            if self._tx_depth:
+                yield
+            else:
+                with self._conn:
+                    yield
+
     # ---------- nodes ----------
     def add_nodes(self, nodes: list[dict]) -> tuple[int, int]:
         """增量合并节点：按 tag upsert，返回 (新增数, 更新数)。
@@ -174,7 +209,7 @@ class DB:
              json.dumps(n["outbound"], ensure_ascii=False))
             for n in nodes
         ]
-        with self._lock, self._conn:
+        with self._write():
             for tag, name, outbound in rows:
                 exists = self._conn.execute(
                     "SELECT 1 FROM nodes WHERE tag = ?", (tag,)
@@ -240,7 +275,7 @@ class DB:
         return self._node_from_row(row) if row else None
 
     def set_node_health(self, tag: str, healthy: bool, detail: str = ""):
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute(
                 "UPDATE nodes SET healthy = ?, last_check = ? WHERE tag = ?",
                 (1 if healthy else 0, time.strftime("%Y-%m-%d %H:%M:%S") + " " + detail, tag),
@@ -248,7 +283,7 @@ class DB:
 
     def set_node_name(self, tag: str, name: str) -> bool:
         """改节点的显示名。name 与 tag 解耦：改名不动 tag，也不需要重载。"""
-        with self._lock, self._conn:
+        with self._write():
             cur = self._conn.execute(
                 "UPDATE nodes SET name = ? WHERE tag = ?", (name, tag)
             )
@@ -260,7 +295,7 @@ class DB:
         返回 (是否真的删掉了, 受影响用户名)。被摘空的池**不会**自动补节点 ——
         因删节点导致的空池不做处理，该用户就是暂时不进配置。
         """
-        with self._lock, self._conn:
+        with self._write():
             affected = [r[0] for r in self._conn.execute(
                 "SELECT username FROM user_nodes WHERE tag = ? ORDER BY username", (tag,)
             ).fetchall()]
@@ -291,7 +326,7 @@ class DB:
         而他会静默地从生成的配置里消失。
         """
         tags = _dedup(node_tags or [])
-        with self._lock, self._conn:
+        with self._write():
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             cur = self._conn.execute(
                 "INSERT INTO users(username, password, status, created_at, updated_at) "
@@ -376,7 +411,7 @@ class DB:
         先 dedup：池里的重复 tag 会让生成的 selector 出现重复成员。
         """
         tags = _dedup(tags)
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("DELETE FROM user_nodes WHERE username = ?", (username,))
             if tags:
                 self._conn.executemany(
@@ -391,7 +426,7 @@ class DB:
 
     def set_user_password(self, username: str, password: str):
         """改口令。要求调用方随后重载配置，否则旧口令在跑的进程里仍然有效。"""
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute(
                 "UPDATE users SET password = ?, updated_at = ? WHERE username = ?",
                 (password, time.strftime("%Y-%m-%d %H:%M:%S"), username),
@@ -399,7 +434,7 @@ class DB:
 
     def revoke_user(self, username: str):
         """停用：移出 active 集合 + 随机作废口令（幂等）。"""
-        with self._lock, self._conn:
+        with self._write():
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             self._conn.execute(
                 "UPDATE users SET status = 'revoked', password = ?, revoked_at = ?, "
@@ -409,7 +444,7 @@ class DB:
 
     def activate_user(self, username: str, password: str):
         """恢复一个停用用户：重新发一个全新口令并放回 active。"""
-        with self._lock, self._conn:
+        with self._write():
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             self._conn.execute(
                 "UPDATE users SET status = 'active', password = ?, revoked_at = NULL, "
@@ -423,7 +458,7 @@ class DB:
         不删 user_nodes 会留下孤儿行：既污染 users_by_node() 的计数，又会
         在同名用户重建时把旧池捞回来。
         """
-        with self._lock, self._conn:
+        with self._write():
             cur = self._conn.execute("DELETE FROM users WHERE username = ?", (username,))
             self._conn.execute("DELETE FROM user_nodes WHERE username = ?", (username,))
         return cur.rowcount > 0
