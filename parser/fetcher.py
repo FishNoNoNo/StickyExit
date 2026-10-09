@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
 import re
-import urllib.parse
-from typing import Any
 
 import httpx
 import yaml
 
 import config
+from parser.links import parse_plain_links, url_to_outbound
 
 logger = logging.getLogger("distributor.fetcher")
 
@@ -27,13 +25,6 @@ TEXT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "*/*",
 }
-
-_SUPPORTED_PREFIXES = (
-    "vmess://", "vless://", "ss://", "trojan://",
-    "hy2://", "hysteria2://", "hysteria://", "tuic://",
-    "socks://", "socks5://", "socks4://", "http://", "https://",
-    "wg://", "ssh://", "naive+https://",
-)
 
 
 async def _fetch_text(url: str, timeout: int = 45) -> str:
@@ -88,8 +79,16 @@ def _strip_comments(text: str) -> str:
 
 
 def parse_clash_yaml(text: str) -> list[dict]:
-    """解析 Clash YAML，返回每个 proxy 的源字段 dict（保留原样）。"""
-    data = yaml.safe_load(text)
+    """解析 Clash YAML，返回每个 proxy 的源字段 dict（保留原样）。
+
+    非 YAML 文本（每行一个 proxy:// 链接的纯文本）返回空列表，交给
+    links.parse_plain_links 兜底；不能让 yaml.safe_load 的 ParserError
+    冒出去 —— 例如链接列表里夹一行 # 注释就会触发，导致导入整体 500。
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
     if not isinstance(data, dict) or "proxies" not in data:
         logger.warning("YAML 中没有 proxies 字段")
         return []
@@ -97,24 +96,6 @@ def parse_clash_yaml(text: str) -> list[dict]:
     if not isinstance(proxies, list):
         return []
     return [p for p in proxies if isinstance(p, dict)]
-
-
-def parse_plain_links(text: str) -> list[str]:
-    """从普通文本（每行一个 proxy:// 链接）中提取 URL。"""
-    links = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith(_SUPPORTED_PREFIXES):
-            links.append(line)
-        elif "://" in line:
-            # trap: 偶发链接带参数换行
-            links.extend(
-                part.strip() for part in line.split()
-                if part.strip().startswith(_SUPPORTED_PREFIXES)
-            )
-    return links
 
 
 # --- node → sing-box outbound 映射（核心转换） --------------------------------
@@ -359,23 +340,6 @@ def clash_node_to_outbound(proxy: dict) -> dict:
     raise ValueError(f"不支持的节点类型: {ptype}")
 
 
-# singbox2proxy 库里 parse_link 可用时优先用（支持更多 URL 变体）
-try:
-    from singbox2proxy.parsers import parse_link as _parse_link  # type: ignore
-    _HAS_SINGBOX2PROXY = True
-except Exception:
-    _HAS_SINGBOX2PROXY = False
-
-
-def _url_to_outbound(url: str) -> dict:
-    if _HAS_SINGBOX2PROXY:
-        # 库返回的 tag 固定为 "proxy"，这里剥掉保证不冲突
-        out = _parse_link(url)
-        out.pop("tag", None)
-        return out
-    raise ValueError(f"未安装 singbox2proxy，无法解析 URL: {url[:50]}")
-
-
 def _stable_tag(name: str, server: str, port: int, idx: int = 0) -> str:
     """节点唯一 tag：原始名 + 服务器 + 端口 hash。"""
     raw = f"{name}|{server}|{port}"
@@ -426,7 +390,7 @@ async def fetch_nodes(url: str) -> list[dict]:
         links = parse_plain_links(text)
         for u in links:
             try:
-                out = _url_to_outbound(u)
+                out = url_to_outbound(u)
             except Exception as e:
                 logger.warning("跳过链接: %s", e)
                 continue

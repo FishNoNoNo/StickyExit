@@ -7,12 +7,15 @@
 from .fetcher import (
     fetch_nodes,          # 从订阅链接拉取
     parse_clash_yaml,     # Clash YAML 文本
-    parse_plain_links,    # 纯文本 URL 列表
     clash_node_to_outbound,  # 单个 Clash 节点 -> sing-box outbound
     normalize_outbound,
+)
+from .links import (
+    parse_plain_links,    # 纯文本 URL 列表
+    url_to_outbound,      # 单条节点链接 -> sing-box outbound
 )
 
 __all__ = [
     "fetch_nodes", "parse_clash_yaml", "parse_plain_links",
-    "clash_node_to_outbound", "normalize_outbound",
+    "clash_node_to_outbound", "normalize_outbound", "url_to_outbound",
 ]

@@ -34,7 +34,7 @@ from converter.configgen import GROUP_PREFIX
 from converter.supervisor import _file_digest
 from parser import (
     clash_node_to_outbound, fetch_nodes, normalize_outbound,
-    parse_clash_yaml, parse_plain_links,
+    parse_clash_yaml, parse_plain_links, url_to_outbound,
 )
 from storage import DB
 
@@ -527,8 +527,7 @@ def _nodes_from_text(text: str) -> list:
     else:
         for u in parse_plain_links(text):
             try:
-                from parser.fetcher import _url_to_outbound
-                node = normalize_outbound(_url_to_outbound(u), u)
+                node = normalize_outbound(url_to_outbound(u), u)
             except Exception as e:
                 print("skip", u[:40], e)
                 continue
