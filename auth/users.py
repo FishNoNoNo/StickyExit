@@ -1,47 +1,55 @@
 ﻿# -*- coding: utf-8 -*-
 """③-2 认证模块：账号管理（建号 / 停用 / 恢复 / 改密 / 删除）。
 
-与 auth/allocator.py（分配）互补：allocator 决定"用哪个节点"，
-这里决定"谁能用"。
+与 auth/allocator.py（分配）互补：allocator 决定「用哪些节点」，
+这里决定「谁能用」。
 
-停用的完整语义（改这一块是本次的重点）：
+停用的完整语义：
 1. 从 active 集合移出 -> 生成的 sing-box 配置里不再有这个人；
 2. 立即作废口令 -> 就算热重载失败，旧进程里的旧口令也不再匹配任何东西；
 3. 改配置后必须真的重启成功 -> 由 Supervisor.reload 保证，重启失败要报错。
+
+节点池：一个用户一个有序池，池内顺序就是优先级。池与池之间允许重叠。
 """
 from __future__ import annotations
 
 import logging
 import secrets
 
-from auth.allocator import assign_node
 from storage import DB
 
 logger = logging.getLogger("distributor.auth")
 
 
-def create_user(db: DB, username: str, nodes: list[dict],
-                prefer: str | None = None,
-                password: str | None = None) -> dict:
-    """建号：自动分配一个节点（与其他用户不同）+ 随机口令。
+def create_user(db: DB, username: str,
+                password: str | None = None,
+                prefer: str | None = None) -> dict:
+    """建号。
 
-    username 已存在或节点不足会抛 ValueError。
+    两个入口，两种初始池：
+    - 「新建用户」（不带 prefer）：**空池**起步 —— 节点池由用户自己配（方案 B）。
+    - 节点行的「加用户」（prefer=<tag>）：**单成员池 [tag]** —— 快捷把这个节点
+      与用户绑定（想加更多，之后在池编辑器里加）。
+
+    prefer 指向的节点必须存在，否则抛 ValueError。一个节点都没有时建号没有
+    意义（配池时无节点可选），同样抛错提示先导入。
     """
     username = username.strip()
     if not username or any(c in username for c in ("@", ":", "/")):
         raise ValueError("用户名不能包含 @ : / 等字符")
     if db.get_user(username):
         raise ValueError(f"用户 {username} 已存在")
-
-    nodes = nodes or db.get_nodes(healthy_only=True) or db.get_nodes()
-    if not nodes:
+    if not db.get_nodes():
         raise ValueError("节点池为空，请先添加/拉取节点")
 
-    tag = assign_node(db, username, nodes, prefer=prefer)
-    if not tag:
-        raise ValueError("节点不足：所有节点已被占用或不可用")
+    tags: list[str] = []
+    if prefer:
+        if not db.get_node(prefer):
+            raise ValueError(f"节点 {prefer} 不存在")
+        tags = [prefer]
+
     pw = password or secrets.token_urlsafe(16)
-    return db.add_user(username, pw, tag)
+    return db.add_user(username, pw, tags)
 
 
 def verify(db: DB, username: str, password: str) -> dict | None:
@@ -73,8 +81,9 @@ def revoke(db: DB, username: str) -> bool:
 def activate(db: DB, username: str) -> dict:
     """恢复一个被停用的用户，返回带新口令的用户记录。
 
-    恢复时重新分配节点（原分配可能已失效），并发放全新口令 ——
-    被停用期间泄露过的旧口令绝不复用。
+    和建号一样：**不自动分配节点**（方案 B）。池还在就原样保留（停用期间
+    user_nodes 的行没被删）；池已空就保持空池 —— 恢复只发新口令，配池是
+    用户自己的事。恢复时发放全新口令：被停用期间泄露过的旧口令绝不复用。
     """
     u = db.get_user(username)
     if not u:
@@ -82,20 +91,9 @@ def activate(db: DB, username: str) -> dict:
     if u["status"] == "active":
         raise ValueError(f"用户 {username} 已经是启用状态")
 
-    nodes = db.get_nodes(healthy_only=True) or db.get_nodes()
-    if not nodes:
-        raise ValueError("节点池为空，无法恢复用户")
-
-    tag = u["node_tag"] if u["node_tag"] and any(n["tag"] == u["node_tag"] for n in nodes) else None
-    if not tag:
-        tag = assign_node(db, username, nodes)
-    if not tag:
-        raise ValueError("节点不足：所有节点已被占用，无法恢复该用户")
-
     pw = secrets.token_urlsafe(16)
     db.activate_user(username, pw)
-    db.set_user_node(username, tag)
-    logger.info("用户 %s 已恢复，新节点 %s，新口令已发放", username, tag)
+    logger.info("用户 %s 已恢复，新口令已发放", username)
     u = db.get_user(username)
     assert u is not None
     return u

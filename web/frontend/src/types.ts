@@ -18,11 +18,18 @@ export interface NodeRow {
   server?: string;
   port?: number | string;
   healthy: boolean;
-  /** 该节点上绑定了几个人（active 用户数） */
+  /** 有多少个 active 用户的节点池包含这个节点（池可重叠，可能大于用户总数） */
   users?: number;
 }
 
-/** 轻量节点条目，只用于「换节点」下拉。 */
+/** 节点池里的一个成员；池内数组顺序即优先级。 */
+export interface PoolNode {
+  tag: string;
+  name: string;
+  healthy: boolean;
+}
+
+/** 轻量节点条目，只用于「节点池」编辑器的下拉。 */
 export interface NodeOption {
   tag: string;
   name: string;
@@ -32,8 +39,10 @@ export interface NodeOption {
 export interface UserRow {
   username: string;
   status: string;
-  node_tag: string;
-  node_name: string;
+  /** 节点池，按优先级排列，可为空数组 */
+  nodes: PoolNode[];
+  /** 当前实际走的是池里哪个节点（由后端从 Clash API 取，空串=未知） */
+  active_node?: string;
   created_at: string;
   revoked_at?: string | null;
   proxy: string;
@@ -42,7 +51,7 @@ export interface UserRow {
 export interface CreatedUser {
   username: string;
   password: string;
-  node_tag: string;
+  nodes: PoolNode[];
   proxy: string;
 }
 

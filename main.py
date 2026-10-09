@@ -5,7 +5,9 @@
 1. 若节点池非空，生成 sing-box 配置并确保代理在跑。已有实例在跑时会比对
    配置内容：一致就复用，不一致（典型情况是上次 python 被强杀、sing-box
    被孤儿化）就重启接管，避免旧配置里的旧口令继续生效。
-2. 用 uvicorn 启动 FastAPI Web 管理页（默认 0.0.0.0:5003），浏览器打开即可导入节点 / 建用户。
+2. 拉起健康探测定时作业（APScheduler）：探测用户池里的节点，连续失败到阈值
+   就经 Clash API 把该用户切到池内下一个可用节点，恢复后再自动回切。
+3. 用 uvicorn 启动 FastAPI Web 管理页（默认 0.0.0.0:5003），浏览器打开即可导入节点 / 建用户。
 
 注意：启动时如果数据库里一个 active 用户都没有，生成的配置是"封闭模式"
 （入站不认证 + 所有流量 block）。端口会开着但拒绝一切代理流量，
@@ -83,6 +85,14 @@ def main() -> int:
     except Exception as e:
         LOG.error("启动代理失败: %s", e, exc_info=True)
 
+    # 节点池的降级/回切靠这个定时探测驱动（selector 自己不会故障转移）。
+    # 起不来也不该拦住 Web 页 —— 只是失去自动切换能力而已。
+    from converter import health
+    try:
+        health.start(db)
+    except Exception as e:
+        LOG.error("启动健康探测失败（节点池不会自动降级/回切）: %s", e, exc_info=True)
+
     from web.server import create_app
     app = create_app(db)
     print(f"[启动] Web 管理页: http://{config.WEB_HOST}:{config.WEB_PORT}")
@@ -92,6 +102,7 @@ def main() -> int:
     try:
         uvicorn.run(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="info")
     finally:
+        health.stop()
         db.close()
     return 0
 

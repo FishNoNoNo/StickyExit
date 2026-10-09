@@ -28,8 +28,10 @@ from auth import (
 )
 from auth.allocator import check_all_and_mark
 from converter import (
-    Supervisor, SupervisorError, drop_invalid_nodes, generate_and_validate,
+    Supervisor, SupervisorError, clashapi, health,
+    drop_invalid_nodes, generate_and_validate,
 )
+from converter.configgen import GROUP_PREFIX
 from converter.supervisor import _file_digest
 from parser import (
     clash_node_to_outbound, fetch_nodes, normalize_outbound,
@@ -60,7 +62,9 @@ def _apply(db: DB, action: str) -> dict:
     except Exception as e:
         raise ConfigApplyError(f"配置生成/校验失败: {e}") from e
     try:
-        Supervisor().reload(cfg)
+        # 和健康探测互斥：别让一次切换请求打到正在重启的 sing-box 上。
+        with health.cycle_lock():
+            Supervisor().reload(cfg)
     except SupervisorError as e:
         # 旧实例已被停掉，代理现在处于停止状态：如实上报。
         logger.error("%s 后重载 sing-box 失败: %s", action, e)
@@ -238,10 +242,11 @@ def create_app(db: DB | None = None) -> FastAPI:
         page_size = min(max(1, page_size), 200)
         term = search.strip()
         total = _db.count_nodes(search=term)
-        counts = _db.node_user_counts()
+        counts = _db.users_by_node()
         page_nodes = _db.get_nodes(limit=page_size, offset=(page - 1) * page_size,
                                    search=term)
-        # 节点不暴露完整字段，outbound 只给摘要
+        # 节点不暴露完整字段，outbound 只给摘要；users = 有多少个 active 用户的
+        # 节点池包含这个节点（池之间允许重叠，所以这个数可能大于用户总数）。
         rows = [{
             "tag": n["tag"], "name": n["name"], "type": n["outbound"].get("type"),
             "server": n["outbound"].get("server"), "port": n["outbound"].get("server_port"),
@@ -279,24 +284,21 @@ def create_app(db: DB | None = None) -> FastAPI:
 
     @app.post("/api/nodes/{tag:path}/delete")
     async def api_node_delete(tag: str):
-        """删除节点：绑在它上面的用户自动迁移到其他节点。
+        """删除节点：把它从所有用户的节点池里摘掉。
 
-        删除已入库（含迁移），运行中的 sing-box 在手动"重载"后才会更新。
+        被摘空的池**不做处理** —— 池空着的用户就是不进配置，等人工决定要不要
+        补节点。摘除和删除在同一个事务里完成（见 storage.delete_node）。
+        运行中的 sing-box 在手动"重载"后才会更新。
         """
         _db = get_db()
         tag = tag.strip()
         with _lock:
             if not _db.get_node(tag):
                 return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
-            _db.delete_node(tag)
-            # 被删节点上可能还绑着用户：从剩余节点里重新分配；这是"删除"这个
-            # 用户主动触发的显式动作，不属于自动迁移。
-            from auth.allocator import ensure_all_users_have_node
-            changed, doomed = ensure_all_users_have_node(_db, _db.get_nodes())
+            _, affected = _db.delete_node(tag)
             return _json({
                 "ok": True, "tag": tag,
-                "migrated": [u["username"] for u in changed],
-                "doomed": doomed,
+                "removed_from": affected,
                 "pending_reload": True,
             })
 
@@ -309,12 +311,21 @@ def create_app(db: DB | None = None) -> FastAPI:
         total = _db.count_users(active_only=False)
         users = []
         advertise_ip = await config.get_advertise_ip()
+        all_nodes = _db.get_nodes()
+        names = {n["tag"]: n["name"] for n in all_nodes}
+        healthy = {n["tag"]: bool(n.get("healthy")) for n in all_nodes}
+        # 每个用户当前实际走的是哪个成员（selector 的 now）。取不到就空着，
+        # 「检测节点」之外它只用于展示。
+        selection = clashapi.current_selection()
         for u in _db.list_users(active_only=False,
                                 limit=page_size, offset=(page - 1) * page_size):
-            node = _db.get_node(u["node_tag"]) if u["node_tag"] else None
             users.append({
                 "username": u["username"], "status": u["status"],
-                "node_tag": u["node_tag"], "node_name": node["name"] if node else "",
+                # 按优先级排序的节点池；池可以为空。
+                "nodes": [{"tag": t, "name": names.get(t, ""),
+                           "healthy": healthy.get(t, False)}
+                          for t in (u.get("nodes") or [])],
+                "active_node": selection.get(GROUP_PREFIX + u["username"], ""),
                 "created_at": u["created_at"], "revoked_at": u.get("revoked_at"),
                 # 停用用户的代理地址不展示，因为口令已经作废。
                 "proxy": proxy_endpoint(u, advertise_ip, config.LISTEN_PORT)
@@ -322,8 +333,21 @@ def create_app(db: DB | None = None) -> FastAPI:
             })
         return _json({"users": users, "total": total, "page": page, "page_size": page_size})
 
+    def _pool_detail(db: DB, tags: list[str]) -> list[dict]:
+        """把一池 tag 补成 {tag, name, healthy}（供建号/恢复回包用，跟列表接口一致）。"""
+        names = {n["tag"]: n["name"] for n in db.get_nodes()}
+        healthy = {n["tag"]: bool(n.get("healthy")) for n in db.get_nodes()}
+        return [{"tag": t, "name": names.get(t, ""), "healthy": healthy.get(t, False)}
+                for t in tags]
+
     @app.post("/api/users")
     async def api_users_post(request: Request):
+        """建号。两种入口两种初始池：
+
+        - 不带 prefer：**空池**起步（节点池由用户自己在池编辑器里配）。
+        - 带 prefer=<tag>（节点行「加用户」）：**单成员池 [tag]** —— 快捷把该
+          节点与用户绑定。
+        """
         _db = get_db()
         try:
             body = await request.json()
@@ -334,14 +358,14 @@ def create_app(db: DB | None = None) -> FastAPI:
         advertise_ip = await config.get_advertise_ip()
         with _lock:
             try:
-                user = create_user(_db, username, _db.get_nodes(), prefer=prefer)
+                user = create_user(_db, username, prefer=prefer)
             except ValueError as e:
                 return _json({"ok": False, "error": str(e)}, 400)
             return _json({
                 "ok": True,
                 "user": {
                     "username": user["username"], "password": user["password"],
-                    "node_tag": user["node_tag"],
+                    "nodes": _pool_detail(_db, user["nodes"]),
                     "proxy": proxy_endpoint(user, advertise_ip, config.LISTEN_PORT),
                 },
                 "pending_reload": True,
@@ -382,7 +406,8 @@ def create_app(db: DB | None = None) -> FastAPI:
                 "ok": True,
                 "user": {
                     "username": user["username"], "password": user["password"],
-                    "node_tag": user["node_tag"],
+                    # 和 GET /api/users 的 nodes 保持同形状：{tag, name, healthy}。
+                    "nodes": _pool_detail(_db, user["nodes"]),
                     "proxy": proxy_endpoint(user, advertise_ip, config.LISTEN_PORT),
                 },
                 "pending_reload": True,
@@ -420,22 +445,38 @@ def create_app(db: DB | None = None) -> FastAPI:
                 "pending_reload": True,
             })
 
-    @app.post("/api/users/{username}/switch")
-    async def api_user_switch(username: str, request: Request):
+    @app.post("/api/users/{username}/pool")
+    async def api_user_pool(username: str, request: Request):
+        """整体替换用户的节点池。
+
+        body: {"tags": [...]} —— **列表顺序就是优先级**（越靠前越优先）。
+        允许空池（该用户会暂时不进配置）。池大小不设上限。
+        """
         _db = get_db()
         try:
             body = await request.json()
         except Exception:
             body = {}
-        tag = (body.get("tag") or "").strip()
+        raw = body.get("tags")
+        if not isinstance(raw, list):
+            return _json({"ok": False, "error": "tags 必须是数组"}, 400)
         with _lock:
             if not _db.get_user(username):
                 return _json({"ok": False, "error": "用户不存在"}, 404)
-            if not _db.get_node(tag):
-                return _json({"ok": False, "error": f"节点 {tag} 不存在"}, 404)
-            # 只入库，不重载：手动点"重载"后新路由才生效。
-            _db.set_user_node(username, tag)
-            return _json({"ok": True, "pending_reload": True})
+            # 去重但保序：池里重复的 tag 会让生成的 selector 出现重复成员。
+            ordered, seen = [], set()
+            for t in raw:
+                t = str(t or "").strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                ordered.append(t)
+            for t in ordered:
+                if not _db.get_node(t):
+                    return _json({"ok": False, "error": f"节点 {t} 不存在"}, 404)
+            _db.set_user_nodes(username, ordered)
+            # 只入库，不重载：手动点"重载"后新的优先级才生效。
+            return _json({"ok": True, "tags": ordered, "pending_reload": True})
 
     # ---------- 重载 ----------
     @app.post("/api/reload")

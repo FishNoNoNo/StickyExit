@@ -1,17 +1,18 @@
-"""节点分配器：user ↔ node 的映射与健康标注。
+"""节点分配器：user ↔ 节点池 的映射与健康标注。
 
 策略：
-1. 已分配且节点存在的用户 → 保留原节点（避免刷新时频繁跳动）。
-2. 新用户 → 从未被占用的健康节点里轮换挑选。
-3. 用户数 > 节点数 → 抛出明确错误，由 CLI 提示限号/扩容。
-4. 每次应用配置前，先探测「被绑定节点」的健康并回写 DB 标注。
-   探测只标注，不做自动迁移 —— 死节点等做节点操作时再手动处理。
+1. 一个用户一个池，**池内顺序就是优先级**（越靠前越优先）。
+2. 池与池之间允许重叠 —— 单节点时代的「一个节点只能给一个人」独占语义已经
+   整个去掉了（`used_node_tags` 随之删除）。
+3. 新用户 → 按用户名做稳定轮转，从全量节点里取 k 个入池。
+4. 删节点只摘不补：池里的失效成员被摘掉，摘空了就空着，不自动补人。
+5. 这里只负责「标注」和「建池」，不做任何迁移。运行时的降级 / 回切由
+   converter/health.py 通过 Clash API 完成 —— 那是运行期行为，不是分配行为。
 """
 from __future__ import annotations
 
 import logging
 import socket
-import threading
 from typing import Iterable
 
 import config
@@ -21,66 +22,57 @@ import storage
 logger = logging.getLogger("distributor.allocator")
 
 
-def _node_identity(node: dict) -> tuple:
-    out = node["outbound"]
-    return (out.get("server"), out.get("server_port"))
+def assign_pool(username: str, nodes: list[dict],
+                k: int = config.POOL_SIZE,
+                prefer: str | None = None) -> list[str]:
+    """按用户名挑一个有序节点池。返回 [] 表示一个可用节点都没有。
+
+    注意：建号 / 恢复现在都走「空池起步」（用户自己配池），这个函数目前并
+    没有被调用 —— 留着以备将来「一键随机配池」之类的功能使用，逻辑经过
+    验证可复用。
+
+    轮转输入是**全量节点按 tag 排序**，不是健康子集：健康状态会被手动的
+    「检测节点」按钮整批翻转，拿它当轮转输入，一次健康检查就能把所有人的
+    池重排一遍，配置摘要跟着变，Supervisor 会平白无故重启 sing-box。
+
+    哈希必须**稳定**：这里用 sum(ord(c))，不能用内置 hash() —— 后者每个
+    进程加盐，重启一次池顺序就全变。
+
+    prefer 命中的节点会被提到池首。
+    """
+    tags = sorted({n["tag"] for n in nodes})
+    if not tags:
+        return []
+    k = max(1, min(k, len(tags)))
+    start = sum(ord(c) for c in username) % len(tags)
+    picked = [tags[(start + i) % len(tags)] for i in range(k)]
+    if prefer and prefer in tags:
+        picked = ([prefer] + [t for t in picked if t != prefer])[:k]
+    return picked
 
 
-def assign_node(db: storage.DB, username: str, nodes: list[dict], prefer: str | None = None) -> str | None:
-    """为用户名分配一个节点 tag。返回 None 表示无可供分配的健康节点。"""
-    if prefer:
-        for n in nodes:
-            if n["tag"] == prefer:
-                return prefer
+def prune_user_pools(db: storage.DB, nodes: list[dict]) -> list[str]:
+    """把池里已不存在于节点表的 tag 摘掉，返回被改动过的用户名。
 
-    used = db.used_node_tags()
-    # 只从健康节点里挑。调用方应传"健康的那批"（比如 nodes_filtered by
-    # healthy），但这里也兜底过滤一遍：死节点不该被当成可分配资源。
-    healthy = [n for n in nodes if n.get("healthy", True)]
-    free = [n for n in healthy if n["tag"] not in used]
-    if not free:
-        free = healthy  # 退化：健康那批没人可独占时允许复用，交给调用方决定是否拒绝
-    if not free:
-        return None
-    # 稳定轮换：按 tag 排序取 hash，让不同新用户尽量错开
-    index = sum(ord(c) for c in username) % len(free)
-    return free[index]["tag"]
+    **只摘不补**：池被摘空就空着，那个用户暂时不进配置，等人工决定要不要补。
 
-
-def ensure_all_users_have_node(db: storage.DB, nodes: list[dict]) -> tuple[list[dict], list[str]]:
-    """保证所有 active 用户都有节点；返回 (需要更新的用户, 无可分配的用户名)。"""
-    node_by_tag = {n["tag"]: n for n in nodes}
-    users = db.list_users(active_only=True)
-    changed: list[dict] = []
-    doomed: list[str] = []
-
-    for u in users:
-        current = u["node_tag"]
-        if current and current in node_by_tag:
-            continue
-        # 原节点失效/被删 → 重新分配
-        if current:
-            logger.warning("用户 %s 的原节点 %s 已失效，重新分配", u["username"], current)
-        # 优先别抢别人正占用的节点；用户自己的节点也在候选里。
-        free_tags = [t for t in node_by_tag
-                     if t not in db.used_node_tags() or t == current]
-        candidates = [n for n in nodes if n["tag"] in free_tags]
-        new_tag = assign_node(db, u["username"], candidates or nodes)
-        if not new_tag:
-            doomed.append(u["username"])
-            continue
-        db.set_user_node(u["username"], new_tag)
-        u["node_tag"] = new_tag
-        changed.append(u)
-
-    return changed, doomed
+    正常删节点走的是 storage.delete_node（它在同一个事务里就把池摘干净了），
+    这个函数是给「节点表被别的方式改动过」兜底。
+    """
+    live = {n["tag"] for n in nodes}
+    changed: list[str] = []
+    for u in db.list_users(active_only=True):
+        pool = u.get("nodes") or []
+        kept = [t for t in pool if t in live]
+        if len(kept) != len(pool):
+            db.set_user_nodes(u["username"], kept)
+            logger.warning("用户 %s 的节点池摘掉了 %d 个已失效节点",
+                           u["username"], len(pool) - len(kept))
+            changed.append(u["username"])
+    return changed
 
 
-# ---------- 健康检查 ----------
-
-_health_cache: dict[str, tuple[float, bool]] = {}
-_health_lock = threading.Lock()
-
+# ---------- 健康检查（手动全量探测）----------
 
 def check_node_connectivity(node: dict, timeout: float = config.NODE_CHECK_TIMEOUT) -> bool:
     """TCP 拨测节点服务器：通 = 服务器活着（不代表机场线路可用）。"""
@@ -97,69 +89,11 @@ def check_node_connectivity(node: dict, timeout: float = config.NODE_CHECK_TIMEO
         return False
 
 
-def check_and_mark(db: storage.DB, nodes: list[dict]) -> None:
-    """探测节点健康并回写标注；结果缓存 300 秒避免重复探测。
+def probe_many(db: storage.DB, nodes: list[dict]) -> list[str]:
+    """并发探测节点并回写 healthy 标注，返回探测过的 tag（不受缓存约束）。
 
-    只做标注，不做任何迁移：节点挂掉不等于立刻要动用户（用户可能等
-    手动操作时一起处理），这里只负责让 healthy 列反映真实可达性。
-    """
-    import time as _time
-    now = _time.monotonic()
-    with _health_lock:
-        for n in nodes:
-            cached = _health_cache.get(n["tag"])
-            ok = False
-            if cached and now - cached[0] < 300:
-                ok = cached[1]
-            else:
-                ok = check_node_connectivity(n)
-                _health_cache[n["tag"]] = (now, ok)
-            db.set_node_health(n["tag"], ok)
-
-
-def reassign_dead(db: storage.DB, nodes: list[dict]) -> list[dict]:
-    """把绑定在不可达节点上的用户迁移到其他活跃节点。返回被迁移的用户。"""
-    healthy = [n for n in nodes if n.get("healthy", True)]
-    healthy_tags = {n["tag"] for n in healthy}
-    migrated: list[dict] = []
-    for u in db.list_users(active_only=True):
-        tag = u["node_tag"]
-        if tag and tag in healthy_tags:
-            continue
-        # prefer 指回原节点。candidates 已排除原节点，所以 prefer 只在
-        # "原节点仍健康、但据 DB 状态该迁移"时不命中；不会导致
-        # 把用户留在死节点上。
-        candidates = [n for n in healthy if n["tag"] != tag]
-        new_tag = assign_node(db, u["username"], candidates or healthy,
-                              prefer=tag if tag not in healthy_tags else None)
-        if not new_tag and tag:
-            continue  # 无健康节点可切，保持原样等恢复
-        if new_tag and new_tag != tag:
-            db.set_user_node(u["username"], new_tag)
-            u["node_tag"] = new_tag
-            u["_migrated"] = True
-            logger.warning("用户 %s 从 %s 迁移到 %s", u["username"], tag, new_tag)
-            migrated.append(u)
-    return migrated
-
-
-def check_bound_and_mark(db: storage.DB, nodes: list[dict]) -> list[str]:
-    """只探测「有 active 用户绑定」的节点并回写健康标注，返回探测过的 tag。
-    """
-    used = db.used_node_tags()
-    probed: list[str] = []
-    for n in nodes:
-        if n["tag"] in used:
-            check_and_mark(db, [n])
-            probed.append(n["tag"])
-    return probed
-
-
-def _probe_many(db: storage.DB, nodes: list[dict]) -> list[str]:
-    """并发探测节点健康并回写标注，返回探测过的 tag（不再受 300s 缓存约束）。
-
-    这是"点击检测"的完整语义：不管缓存，每个节点都真的来一遍，这样
-    列表页的健康列反映的是这次点击时的真实可达性。
+    不加缓存：这是"点击检测"的完整语义 —— 每个节点都真的来一遍，这样列表页
+    的健康列反映的是这次点击时的真实可达性。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     probed: list[str] = []
@@ -181,17 +115,15 @@ def _probe_many(db: storage.DB, nodes: list[dict]) -> list[str]:
 
 
 def check_all_and_mark(db: storage.DB) -> dict:
-    """全量健康检测：并发探测所有节点并回写标注（供手动"检测节点"按钮用）。
+    """全量健康检测：并发探测所有节点并回写标注（供手动「检测节点」按钮用）。
 
     返回 {"checked": n, "healthy": m, "unhealthy": [name,...]}。
-    不加缓存：每次点击都是独立一次真实探测；标注写进 nodes.healthy，
-    前端列表据此显示红绿。
     """
     nodes = db.get_nodes()
     if not nodes:
         return {"checked": 0, "healthy": 0, "unhealthy": []}
     names = {n["tag"]: n["name"] for n in nodes}
-    probed = _probe_many(db, nodes)   # 探测结果已写回 DB
+    probed = probe_many(db, nodes)   # 探测结果已写回 DB
     dead = [tag for tag in probed if not db.get_node(tag)["healthy"]]
     return {"checked": len(probed), "healthy": len(probed) - len(dead),
             "unhealthy": [names[tag] for tag in dead]}

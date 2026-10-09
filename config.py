@@ -77,6 +77,38 @@ VERIFY_SSL = os.environ.get("VERIFY_SSL", "0") == "1"
 # 节点健康检查：仅对“被分配”的节点做一次 TCP 可达性探测
 NODE_CHECK_TIMEOUT = float(os.environ.get("NODE_CHECK_TIMEOUT", "5.0"))
 
+# ---------- 节点池 ----------
+
+# 「一键随机配池」目标池大小（建号 / 恢复现在都是空池起步，用户自己配池，
+# 这个值只在真的实现随机配池功能，或手动调用 assign_pool 时才用到）。
+# 不是池的大小上限 —— 池可以任意增删，只放一个节点就等于把出口定死。
+POOL_SIZE = max(1, int(os.environ.get("POOL_SIZE", "3")))
+
+# ---------- Clash API（sing-box 的运行时控制接口）----------
+#
+# selector 是手动组，没人动它就永远停在 default，哪怕那个节点已经死了。
+# Clash API 是唯一能在不重启 sing-box 的前提下改变 selector 选中项的手段，
+# 故障转移就靠它。只绑回环，不要改成 0.0.0.0。
+CLASH_API_HOST = os.environ.get("CLASH_API_HOST", "127.0.0.1").strip()
+CLASH_API_PORT = int(os.environ.get("CLASH_API_PORT", "9090"))
+CLASH_API_SECRET = os.environ.get("CLASH_API_SECRET", "").strip()
+
+# ---------- 健康探测与故障转移 ----------
+#
+# 探测周期。要数「连续 N 次失败」，就必须反复探测 —— 这是刻意恢复自动探测
+# （此前的 commit f63f24e 把自动探测整个去掉了）。探测范围只限「进了某个
+# 用户池的节点」，不碰池外的节点。
+HEALTH_INTERVAL = max(1, int(os.environ.get("HEALTH_INTERVAL", "30")))
+# 连续失败多少次才降级到下一个成员。压住「一次网络波动就切」。
+FAIL_THRESHOLD = max(1, int(os.environ.get("FAIL_THRESHOLD", "3")))
+# 连续成功多少次才回切到优先级更高的成员。压住「回切时来回抖」。
+RECOVER_THRESHOLD = max(1, int(os.environ.get("RECOVER_THRESHOLD", "2")))
+# 探测 URL：**从节点那一侧访问**。国内不通 gstatic 的话必须换掉。
+HEALTH_PROBE_URL = os.environ.get(
+    "HEALTH_PROBE_URL", "http://www.gstatic.com/generate_204"
+).strip()
+HEALTH_PROBE_TIMEOUT = float(os.environ.get("HEALTH_PROBE_TIMEOUT", "5.0"))
+
 
 # ---------- 对外 IP 探测 ----------
 

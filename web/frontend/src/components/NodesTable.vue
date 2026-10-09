@@ -62,7 +62,9 @@ async function onConfirmAddUser() {
     const u = await createUser(name, targetTag.value);
     ElMessage.success({
       message: multiline(
-        "已为用户 " + u.username + " 指定节点 " + u.node_tag + "\n代理: " + u.proxy,
+        u.username + " 已建号，节点 " + targetName.value + " 放入其节点池首位" +
+        "\n代理: " + u.proxy +
+        "\n注意：配置需手动点\"重载\"后才能生效",
       ),
       duration: 6000,
     });
@@ -79,9 +81,9 @@ async function onDeleteNode(tag: string, name: string, users: number) {
   const tip =
     "删除节点 " + name + "（" + tag + "）？此操作不可恢复。" +
     (bound > 0
-      ? "\n该节点上有 " + bound + " 个启用用户，删除后会自动迁移到其他节点。" +
-        "\n若没有可用的剩余节点，这些用户会失去节点。"
-      : "");
+      ? "\n该节点在 " + bound + " 个用户的节点池里，删除后会从这些池中移除。" +
+        "\n被摘空的池会变空，该用户暂时不进代理。"
+      : "\n没有任何用户的节点池包含它。");
   try {
     await ElMessageBox.confirm(multiline(tip), "删除确认", {
       type: "warning",
@@ -95,11 +97,10 @@ async function onDeleteNode(tag: string, name: string, users: number) {
   try {
     const d = await deleteNode(tag);
     let msg = "已删除节点 " + tag;
-    if (d.migrated && d.migrated.length) msg += "，迁移用户 " + d.migrated.length + " 个";
-    ElMessage.success(msg + "；重载后生效");
-    if (d.doomed && d.doomed.length) {
-      ElMessage.warning("以下用户没有可用节点：" + d.doomed.join("、"));
+    if (d.removed_from && d.removed_from.length) {
+      msg += "，影响 " + d.removed_from.length + " 个用户的节点池";
     }
+    ElMessage.success(msg + "；重载后生效");
   } catch (e) {
     ElMessage.error("删除失败: " + (e as Error).message);
   } finally {
@@ -174,7 +175,12 @@ async function onCheckAll() {
       </el-table-column>
       <el-table-column prop="server" label="服务器" min-width="150" show-overflow-tooltip />
       <el-table-column prop="port" label="端口" width="90" />
-      <el-table-column label="用户数" width="80">
+      <el-table-column width="90">
+        <template #header>
+          <el-tooltip content="有多少个启用用户的节点池包含该节点（池可重叠）" placement="top">
+            <span>用户数</span>
+          </el-tooltip>
+        </template>
         <template #default="{ row }">{{ row.users ?? 0 }}</template>
       </el-table-column>
       <el-table-column label="状态" width="100">

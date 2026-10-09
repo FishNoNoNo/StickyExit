@@ -22,6 +22,7 @@ declare module 'vue' {
     ElTable: typeof import('element-plus/es')['ElTable']
     ElTableColumn: typeof import('element-plus/es')['ElTableColumn']
     ElTag: typeof import('element-plus/es')['ElTag']
+    ElTooltip: typeof import('element-plus/es')['ElTooltip']
     ImportPanel: typeof import('./components/ImportPanel.vue')['default']
     NodesTable: typeof import('./components/NodesTable.vue')['default']
     StatCards: typeof import('./components/StatCards.vue')['default']

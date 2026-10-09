@@ -4,7 +4,9 @@
 - 所有写操作走单例连接 + 事务，进程内线程安全。
 - 节点表存 outbound_json，导入时按 tag 增量合并：已有节点更新，缺失节点新增，
   不会因为一次导入就把之前拉到的节点删掉。
-- 分配表 users.node_name 是权威归属：user → 一个节点。
+- 用户 → 节点池的归属存在 user_nodes 表，它是唯一权威：一个用户可以有多个
+  节点，position 就是池内优先级（越小越优先）。旧列 users.node_tag 是单节点
+  时代的遗留，backfill 之后不再读写。
 - users.status 只有 'active' / 'revoked' 两种；停用 = 移出 sing-box 配置 + 立刻作废口令。
 """
 from __future__ import annotations
@@ -63,9 +65,18 @@ class DB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_users_node ON users(node_tag);
                 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
+                CREATE TABLE IF NOT EXISTS user_nodes (
+                    username TEXT NOT NULL,
+                    tag      TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (username, tag)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_nodes_tag ON user_nodes(tag);
                 """
             )
             self._migrate_users()
+            self._migrate_user_nodes()
 
     def _migrate_users(self):
         """给旧库补列（ALTER TABLE ADD COLUMN 幂等，重复启动不会报错）。"""
@@ -73,6 +84,26 @@ class DB:
         for col, ddl in (("updated_at", "TEXT"), ("revoked_at", "TEXT")):
             if col not in have:
                 self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+
+    def _migrate_user_nodes(self):
+        """把单节点时代的 users.node_tag 灌进 user_nodes（幂等）。
+
+        只在「该用户在 user_nodes 里一行都没有」时才灌，所以重复启动不会
+        覆盖后来在前端改过的池。灌完 user_nodes 就是权威，node_tag 只当
+        回滚抓手留着，之后不再读写。
+        """
+        rows = self._conn.execute(
+            "SELECT username, node_tag FROM users "
+            "WHERE node_tag IS NOT NULL AND node_tag != '' "
+            "AND username NOT IN (SELECT username FROM user_nodes)"
+        ).fetchall()
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO user_nodes(username, tag, position) VALUES (?, ?, 0)",
+            [(r[0], r[1]) for r in rows],
+        )
+        logger.info("已把 %d 个用户的单节点分配迁移为节点池", len(rows))
 
     def close(self):
         with self._lock:
@@ -165,10 +196,19 @@ class DB:
                 (1 if healthy else 0, time.strftime("%Y-%m-%d %H:%M:%S") + " " + detail, tag),
             )
 
-    def delete_node(self, tag: str) -> bool:
+    def delete_node(self, tag: str) -> tuple[bool, list[str]]:
+        """删除节点，并把它从所有用户的节点池里摘掉。
+
+        返回 (是否真的删掉了, 受影响用户名)。被摘空的池**不会**自动补节点 ——
+        因删节点导致的空池不做处理，该用户就是暂时不进配置。
+        """
         with self._lock, self._conn:
+            affected = [r[0] for r in self._conn.execute(
+                "SELECT username FROM user_nodes WHERE tag = ? ORDER BY username", (tag,)
+            ).fetchall()]
             cur = self._conn.execute("DELETE FROM nodes WHERE tag = ?", (tag,))
-        return cur.rowcount > 0
+            self._conn.execute("DELETE FROM user_nodes WHERE tag = ?", (tag,))
+        return cur.rowcount > 0, affected
 
     @staticmethod
     def _node_from_row(row) -> dict:
@@ -185,19 +225,33 @@ class DB:
     # ③ 打上时间戳，便于审计
     # 三者缺一，停用就只是"数据库里的一行字"。
 
-    def add_user(self, username: str, password: str, node_tag: str | None) -> dict:
+    def add_user(self, username: str, password: str,
+                 node_tags: list[str] | None = None) -> dict:
+        """建号 + 写节点池，在同一个事务里完成。
+
+        分两次写的话，第二次失败就会留下一个「active 但没有池」的用户，
+        而他会静默地从生成的配置里消失。
+        """
+        tags = _dedup(node_tags or [])
         with self._lock, self._conn:
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             cur = self._conn.execute(
-                "INSERT INTO users(username, password, node_tag, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'active', ?, ?)",
-                (username, password, node_tag, now, now),
+                "INSERT INTO users(username, password, status, created_at, updated_at) "
+                "VALUES (?, ?, 'active', ?, ?)",
+                (username, password, now, now),
             )
+            uid = cur.lastrowid
+            if tags:
+                self._conn.executemany(
+                    "INSERT INTO user_nodes(username, tag, position) VALUES (?, ?, ?)",
+                    [(username, t, i) for i, t in enumerate(tags)],
+                )
             row = self._conn.execute(
-                "SELECT * FROM users WHERE id = ?", (cur.lastrowid,)
+                "SELECT * FROM users WHERE id = ?", (uid,)
             ).fetchone()
         u = self._user_from_row(row)
-        logger.info("新增用户 %s -> 节点 %s", u["username"], u["node_tag"])
+        u["nodes"] = tags
+        logger.info("新增用户 %s -> 节点池 %s", u["username"], tags or "(空)")
         return u
 
     def get_user(self, username: str) -> dict | None:
@@ -205,7 +259,11 @@ class DB:
             row = self._conn.execute(
                 "SELECT * FROM users WHERE username = ?", (username,)
             ).fetchone()
-        return self._user_from_row(row) if row else None
+            if not row:
+                return None
+            u = self._user_from_row(row)
+            u["nodes"] = self._read_pool(username)
+        return u
 
     def list_users(self, active_only: bool = True, limit: int | None = None,
                    offset: int = 0) -> list[dict]:
@@ -219,7 +277,33 @@ class DB:
             args = (limit, max(0, offset))
         with self._lock:
             rows = self._conn.execute(q, args).fetchall()
-        return [self._user_from_row(r) for r in rows]
+            users = [self._user_from_row(r) for r in rows]
+            self._attach_pools(users)
+        return users
+
+    def _read_pool(self, username: str) -> list[str]:
+        """读一个用户的节点池，按优先级（position 升序）。调用方需持锁。"""
+        return [r[0] for r in self._conn.execute(
+            "SELECT tag FROM user_nodes WHERE username = ? ORDER BY position, tag",
+            (username,),
+        ).fetchall()]
+
+    def _attach_pools(self, users: list[dict]) -> None:
+        """给一页用户批量挂上节点池，避免 N+1。调用方需持锁。"""
+        if not users:
+            return
+        by_user: dict[str, list[str]] = {u["username"]: [] for u in users}
+        names = list(by_user)
+        marks = ",".join("?" * len(names))
+        rows = self._conn.execute(
+            f"SELECT username, tag FROM user_nodes WHERE username IN ({marks}) "
+            "ORDER BY position, tag",
+            names,
+        ).fetchall()
+        for username, tag in rows:
+            by_user[username].append(tag)
+        for u in users:
+            u["nodes"] = by_user[u["username"]]
 
     def count_users(self, active_only: bool = True) -> int:
         q = "SELECT COUNT(*) FROM users"
@@ -228,12 +312,24 @@ class DB:
         with self._lock:
             return int(self._conn.execute(q).fetchone()[0])
 
-    def set_user_node(self, username: str, node_tag: str):
+    def set_user_nodes(self, username: str, tags: list[str]) -> list[str]:
+        """整体替换一个用户的节点池。列表顺序就是优先级（越靠前越优先）。
+
+        先 dedup：池里的重复 tag 会让生成的 selector 出现重复成员。
+        """
+        tags = _dedup(tags)
         with self._lock, self._conn:
+            self._conn.execute("DELETE FROM user_nodes WHERE username = ?", (username,))
+            if tags:
+                self._conn.executemany(
+                    "INSERT INTO user_nodes(username, tag, position) VALUES (?, ?, ?)",
+                    [(username, t, i) for i, t in enumerate(tags)],
+                )
             self._conn.execute(
-                "UPDATE users SET node_tag = ?, updated_at = ? WHERE username = ?",
-                (node_tag, time.strftime("%Y-%m-%d %H:%M:%S"), username),
+                "UPDATE users SET updated_at = ? WHERE username = ?",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), username),
             )
+        return tags
 
     def set_user_password(self, username: str, password: str):
         """改口令。要求调用方随后重载配置，否则旧口令在跑的进程里仍然有效。"""
@@ -264,30 +360,63 @@ class DB:
             )
 
     def delete_user(self, username: str) -> bool:
-        """彻底删除用户（含口令与历史）。返回是否真的删掉了。"""
+        """彻底删除用户（含口令、节点池与历史）。返回是否真的删掉了。
+
+        不删 user_nodes 会留下孤儿行：既污染 users_by_node() 的计数，又会
+        在同名用户重建时把旧池捞回来。
+        """
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM users WHERE username = ?", (username,))
+            self._conn.execute("DELETE FROM user_nodes WHERE username = ?", (username,))
         return cur.rowcount > 0
 
-    def used_node_tags(self) -> set[str]:
+    def pool_node_tags(self) -> set[str]:
+        """所有 active 用户的池里出现过的节点 tag。
+
+        健康探测的范围就是它 —— 只探测真的有人在用的节点，池外的一百多个
+        节点不碰。
+        """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT node_tag FROM users WHERE status = 'active' AND node_tag IS NOT NULL"
+                "SELECT DISTINCT un.tag FROM user_nodes un "
+                "JOIN users u ON u.username = un.username "
+                "WHERE u.status = 'active'"
             ).fetchall()
         return {r[0] for r in rows}
 
-    def node_user_counts(self) -> dict[str, int]:
-        """每个节点上绑定了几个 active 用户（给「删除节点」前提示用）。"""
+    def users_by_node(self) -> dict[str, int]:
+        """每个节点被多少个 active 用户的池包含（节点列表的「用户数」列）。
+
+        必须过滤 status = 'active'：停用的用户仍留着池的行，不过滤会把这一
+        列撑大。
+        """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT node_tag, COUNT(*) FROM users "
-                "WHERE status = 'active' AND node_tag IS NOT NULL GROUP BY node_tag"
+                "SELECT un.tag, COUNT(*) FROM user_nodes un "
+                "JOIN users u ON u.username = un.username "
+                "WHERE u.status = 'active' GROUP BY un.tag"
             ).fetchall()
         return {r[0]: int(r[1]) for r in rows}
 
     @staticmethod
     def _user_from_row(row) -> dict:
-        return dict(zip(
+        u = dict(zip(
             ("id", "username", "password", "node_tag", "status", "created_at",
              "updated_at", "revoked_at"), row
         ))
+        # node_tag 是单节点时代的遗留列，backfill 之后不再有权威值。
+        # 留着它外泄只会让调用方读到一个永远过期的节点。
+        u.pop("node_tag", None)
+        return u
+
+
+def _dedup(tags: list[str]) -> list[str]:
+    """去重但保持顺序，并丢掉空串。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        t = (t or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out

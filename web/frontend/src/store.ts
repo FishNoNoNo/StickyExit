@@ -24,7 +24,7 @@ export const usersTotal = ref(0);
 export const userPage = ref(1);
 export const userPageSize = ref(10);
 
-/** 「换节点」下拉要看到全部节点，所以单独走轻量接口。 */
+/** 「节点池」编辑器要看到全部节点，所以单独走轻量接口。 */
 export const nodeOptions = ref<NodeOption[]>([]);
 
 /** 状态轮询失败保持静默，避免网络抖动时弹一堆错误。 */
@@ -137,18 +137,16 @@ export async function createUser(username: string, prefer?: string): Promise<Cre
   const body: { username: string; prefer?: string } = { username };
   if (prefer) body.prefer = prefer;
   const d = await postJSON<{ user: CreatedUser }>("/api/users", body);
-  // 新用户会占用某个节点，节点列表里的「用户数」随之变化，必须一起刷新。
+  // 新用户会占用一池节点，节点列表里的「用户数」随之变化，必须一起刷新。
   await Promise.all([
     loadStatus(), showUser(d.user.username), loadNodeOptions(), refreshNodes(),
   ]);
   return d.user;
 }
 
-/** 删除节点：绑在该节点上的用户由后端自动迁移。 */
-export async function deleteNode(
-  tag: string,
-): Promise<{ migrated: string[]; doomed: string[] }> {
-  const d = await post<{ migrated: string[]; doomed: string[] }>(
+/** 删除节点：把它从所有用户的节点池里摘掉（只摘不补，池可能因此被摘空）。 */
+export async function deleteNode(tag: string): Promise<{ removed_from: string[] }> {
+  const d = await post<{ removed_from: string[] }>(
     "/api/nodes/" + encodeURIComponent(tag) + "/delete",
   );
   await Promise.all([loadStatus(), refreshNodes(), refreshUsers(), loadNodeOptions()]);
@@ -183,7 +181,8 @@ export async function resetPassword(
   );
 }
 
-export async function switchNode(username: string, tag: string): Promise<void> {
-  await postJSON("/api/users/" + encodeURIComponent(username) + "/switch", { tag });
+/** 整体替换用户的节点池；数组顺序即优先级（越靠前越优先）。 */
+export async function setPool(username: string, tags: string[]): Promise<void> {
+  await postJSON("/api/users/" + encodeURIComponent(username) + "/pool", { tags });
   await Promise.all([loadStatus(), refreshUsers(), refreshNodes()]);
 }
