@@ -61,7 +61,9 @@ def ensure_all_users_have_node(db: storage.DB, nodes: list[dict]) -> tuple[list[
         # 原节点失效/被删 → 重新分配
         if current:
             logger.warning("用户 %s 的原节点 %s 已失效，重新分配", u["username"], current)
-        free_tags = [t for t in node_by_tag if t not in db.used_node_tags() or t == current]
+        # 优先别抢别人正占用的节点；用户自己的节点也在候选里。
+        free_tags = [t for t in node_by_tag
+                     if t not in db.used_node_tags() or t == current]
         candidates = [n for n in nodes if n["tag"] in free_tags]
         new_tag = assign_node(db, u["username"], candidates or nodes)
         if not new_tag:
@@ -143,9 +145,6 @@ def reassign_dead(db: storage.DB, nodes: list[dict]) -> list[dict]:
 
 def check_bound_and_mark(db: storage.DB, nodes: list[dict]) -> list[str]:
     """只探测「有 active 用户绑定」的节点并回写健康标注，返回探测过的 tag。
-
-    只标注、不迁移。配合"点击检测"的周期内高频调用：绑定节点少，
-    且 300 秒缓存让重复调用几乎零成本 —— 保留它给未来接入后台定时器用。
     """
     used = db.used_node_tags()
     probed: list[str] = []
