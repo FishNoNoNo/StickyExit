@@ -22,7 +22,7 @@ Each user only needs `username:password@server-ip:1080`. HTTP and SOCKS5 share t
 
 - One sing-box process and one entry port; low memory footprint
 - One ordered node pool per user; pools may overlap while authenticated routes stay isolated
-- Node import from subscription URL, Clash YAML, base64, or plain node links (one per line). Import appends to the pool instead of replacing it
+- Node import from subscription URL, Clash YAML, base64, or plain node links (one per line: `socks5://`, `http://`, `vmess://`, `vless://`, `ss://`, `trojan://`, `hy2://`, `tuic://`, ...). Import appends to the pool instead of replacing it
 - SQLite persistence for nodes, users, and node pools; configuration survives restarts
 - Node health checks with runtime failover and recovery: prefer Clash API delay probes, fall back to TCP; switch to the next available pool member after the failure threshold and switch back after recovery
 - Config validated with `sing-box check` before every manual reload
@@ -102,6 +102,23 @@ npm run build   # outputs to web/static, served by the backend
 - Importing nodes **appends** to the node set. It does not overwrite existing nodes or change existing node pools.
 - Deleting a node removes it from every user pool, without substituting another node; a pool can become empty.
 - Revoking a user invalidates the password immediately. Activating the user keeps the existing node pool (an empty pool stays empty) and issues a brand new password; the old one is never restored.
+
+### Supported Node Links
+
+Plain links (one per line in the "paste node text" box) are turned into sing-box
+outbounds by `parser/links.py`:
+
+| Link scheme | sing-box outbound |
+|---|---|
+| `socks5://` `socks://` `socks4://` `socks4a://` | `socks` (version 5 / 4 / 4a) |
+| `http://` `https://` | `http` (`https` adds TLS) |
+| `ss://` | `shadowsocks` |
+| `vmess://` `vless://` `trojan://` | same name |
+| `hy2://` `hysteria2://` | `hysteria2` |
+| `tuic://` | `tuic` |
+
+Anything else is skipped with a log line instead of failing the whole import —
+including SSR, which sing-box removed in 1.6.
 
 ## What Users Receive
 

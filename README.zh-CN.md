@@ -22,7 +22,7 @@
 
 - 单个 sing-box 进程、单个入口端口，内存占用小
 - 每个用户一个独立的有序节点池；池与池可以重叠，认证路由彼此隔离
-- 节点导入支持订阅链接、Clash YAML、base64、节点链接（每行一条），导入为追加而非覆盖
+- 节点导入支持订阅链接、Clash YAML、base64、节点链接（每行一条：`socks5://` `http://` `vmess://` `vless://` `ss://` `trojan://` `hy2://` `tuic://` 等），导入为追加而非覆盖
 - SQLite 持久化节点、用户与节点池，重启后保留配置
 - 节点健康检查与运行时降级/回切：优先用 Clash API 延迟探测，接口不可用时退回 TCP 拨测；连续失败达阈值后切到池内下一个可用节点，恢复后自动回切
 - 配置先经 `sing-box check` 校验，手动重载时重启进程使配置生效
@@ -101,6 +101,21 @@ npm run build   # 构建产物输出到 web/static，由后端托管
 - 导入节点是**追加**操作，不会覆盖已有节点，也不影响已有用户的节点池。
 - 删除节点会把它从所有用户的节点池中移除，**只摘不补**；池被摘空就保持空池。
 - 停用用户会立刻作废其口令；恢复用户时保留原节点池（空池仍为空），并发放全新口令，旧口令不会恢复。
+
+### 支持的节点链接
+
+在“粘贴节点文本”里每行一条的裸链接，由 `parser/links.py` 转成 sing-box outbound：
+
+| 链接 scheme | sing-box outbound |
+|---|---|
+| `socks5://` `socks://` `socks4://` `socks4a://` | `socks`（version 5 / 4 / 4a） |
+| `http://` `https://` | `http`（`https` 补 TLS） |
+| `ss://` | `shadowsocks` |
+| `vmess://` `vless://` `trojan://` | 同名 outbound |
+| `hy2://` `hysteria2://` | `hysteria2` |
+| `tuic://` | `tuic` |
+
+认不出的类型只跳过并写日志，不会让整次导入失败 —— 包括 sing-box 1.6 起已移除的 SSR。
 
 ## 交付给用户的内容
 

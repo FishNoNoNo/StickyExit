@@ -59,7 +59,7 @@ async function onReload() {
       <el-input
         v-if="kind === 'url'"
         v-model="url"
-        placeholder="https://机场订阅链接 或 http://... 节点链接"
+        placeholder="订阅链接（https:// 或 http:// 开头的 Clash / base64 / 链接列表）"
         clearable
       />
       <el-input
@@ -67,7 +67,7 @@ async function onReload() {
         v-model="text"
         type="textarea"
         :rows="5"
-        placeholder="粘贴 Clash proxies YAML、或每行一个 vmess:// vless:// ss:// trojan:// hy2:// 链接"
+        placeholder="粘贴 Clash proxies YAML，或每行一个节点链接：vmess:// vless:// ss:// trojan:// hy2:// tuic:// socks5:// http://"
       />
 
       <div class="flex flex-wrap gap-2.5">
