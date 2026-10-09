@@ -133,8 +133,14 @@ def _clash_tls(proxy: dict) -> dict | None:
 
 
 def _clash_transport(proxy: dict) -> dict | None:
-    """ws/grpc/httpupgrade 的 sing-box transport 字段。"""
-    network = proxy.get("network")
+    """Clash 的 network/*-opts → sing-box transport 字段。
+
+    返回 None 表示走默认 TCP（sing-box 不需要 transport 字段）。**认不出的
+    network 一律抛 ValueError 而不是当 TCP 处理**：那样会让一个 h2/kcp 节点
+    静默退化成裸 TCP —— check 能过，但连不上，属于"发得出去、用不了"的哑
+    节点。宁可显式跳过并在导入结果里报出来。
+    """
+    network = str(proxy.get("network") or "").strip().lower()
     if network == "ws":
         opts = proxy.get("ws-opts") or {}
         headers = opts.get("headers") or {}
@@ -163,17 +169,24 @@ def _clash_transport(proxy: dict) -> dict | None:
         if opts.get("host"):
             transport["host"] = str(opts["host"])
         return transport
-    if network == "xhttp":
-        opts = proxy.get("xhttp-opts") or {}
-        transport = {"type": "xhttp"}
-        if opts.get("path"):
-            transport["path"] = str(opts["path"])
-        if opts.get("host"):
-            transport["host"] = str(opts["host"])
-        if opts.get("mode"):
-            transport["mode"] = str(opts["mode"])
+    if network in ("h2", "http"):
+        # HTTP/2。Clash 新老版本把参数放在 h2-opts 或 http-opts，两个都认。
+        opts = proxy.get("h2-opts") or proxy.get("http-opts") or {}
+        transport = {"type": "http"}
+        host = opts.get("host")
+        if host:
+            transport["host"] = host if isinstance(host, list) else [str(host)]
+        path = opts.get("path")
+        if path:
+            # sing-box 的 path 是单个字符串，给数组会 unmarshal 失败
+            transport["path"] = str(path[0]) if isinstance(path, list) else str(path)
         return transport
-    return None
+
+    if network in (None, "", "tcp"):
+        return None
+
+    # xhttp 未编入当前构建；kcp / splithttp 等同样没有对应 transport。
+    raise ValueError(f"network={network} 当前 sing-box 构建不支持，已跳过")
 
 
 def clash_node_to_outbound(proxy: dict) -> dict:
@@ -233,8 +246,8 @@ def clash_node_to_outbound(proxy: dict) -> dict:
         tr = _clash_transport(proxy)
         if tr:
             out["transport"] = tr
-        if proxy.get("udp"):
-            out["udp_over_tcp"] = True
+        # 注意：trojan 没有 udp_over_tcp 字段（shadowsocks 才有），
+        # 写了会被 check 判为 unknown field 并让整份配置失效。
         return out
 
     if ptype == "ss":
@@ -243,14 +256,38 @@ def clash_node_to_outbound(proxy: dict) -> dict:
         out["password"] = str(proxy.get("password", ""))
         if proxy.get("udp"):
             out["udp_over_tcp"] = True
-        if proxy.get("plugin"):
-            # ss-plugin 只支持 obfs；v2ray-plugin 有额外 path/host 字段，先不支持
-            if proxy.get("plugin") == "obfs":
-                opts = proxy.get("plugin-opts") or {}
-                out["obfs"] = {
-                    "type": str(opts.get("mode", "http")),
-                    "host": str(opts.get("host", "")),
-                }
+        plugin = str(proxy.get("plugin") or "").strip()
+        if plugin:
+            # sing-box 用 SIP003 的 plugin / plugin_opts 字符串字段，没有
+            # Clash 那种 obfs 对象；写错会被 check 判为 unknown field "obfs"
+            # 并让整份配置失效。
+            opts = proxy.get("plugin-opts") or {}
+            if plugin.lower().startswith("obfs"):
+                # Clash 里叫 obfs，SIP003 里叫 obfs-local（sing-box 内建实现）
+                parts = ["obfs=" + str(opts.get("mode") or "http")]
+                if opts.get("host"):
+                    parts.append("obfs-host=" + str(opts["host"]))
+                out["plugin"] = "obfs-local"
+                out["plugin_opts"] = ";".join(parts)
+            else:
+                # 其余插件名按 SIP003 原样透传（v2ray-plugin 也是 sing-box
+                # 内建的，不需要额外装二进制），选项由 Clash 的 dict 拍平成
+                # "k=v;k2=v2"。认不认得出交给 sing-box check 判定：像
+                # shadow-tls 这种它没有内建支持的会报 plugin not found，
+                # 导入时即被剔除并回报，而不是静默变成连不上的哑节点。
+                parts = []
+                for k, v in opts.items():
+                    if isinstance(v, bool):
+                        if v:
+                            parts.append(str(k))  # tls: true -> "tls"
+                    elif isinstance(v, (str, int, float)) and str(v) != "":
+                        parts.append(f"{k}={v}")
+                # quic 模式 sing-box 强制要求 TLS，Clash 会隐式补上，这里跟上
+                if str(opts.get("mode", "")).lower() == "quic" and not opts.get("tls"):
+                    parts.append("tls")
+                out["plugin"] = plugin
+                if parts:
+                    out["plugin_opts"] = ";".join(parts)
         return out
 
     if ptype == "hysteria2":

@@ -5,6 +5,9 @@
 - 单个 mixed 入站，users 非空 => 强制认证。
 - 每个 active 用户一条 auth_user 路由规则 -> 各自节点。
 - 节点 outbound 统一存 DB(outbound_json)，生成时直接回填。
+- 只把「被路由规则引用」的节点写进 outbounds：check 是整份配置级别的，
+  一个 sing-box 认不出的节点会让整份配置失效，所以没被引用的节点不该
+  出现在配置里（导入时另有 drop_invalid_nodes 作为准入门槛）。
 - 没有任何 active 用户时走"封闭模式"：清空入站用户列表并把 route.final
   指向 block。绝不留下 "users: [] + final: direct" 这种组合 —— 那等于
   一台对全网开放的匿名直连代理。
@@ -39,25 +42,33 @@ def build_config(
         "listen_port": listen_port,
     }
 
-    # ---- outbound：每个节点一个，tag 从 DB 拿 ----
-    # 封闭模式下也保留节点 outbound：data/sing-box.json 因此始终是节点池的一份
-    # 完整快照，DB 万一损坏还能从这里捞回来。
-    outbounds: list[dict] = []
-    seen_tags: set[str] = set()
+    # ---- 节点池：tag -> outbound ----
+    # 这个映射有两个用途：① 判断某个 tag 是不是合法节点（路由规则能不能引用它）；
+    # ② 查找被引用的节点该写什么 outbound。
+    pool: dict[str, dict] = {}
     for n in nodes:
         tag = n["tag"]
-        if tag in seen_tags:
+        if tag in pool:
             continue
-        out = dict(n["outbound"])
-        out["tag"] = tag
-        seen_tags.add(tag)
-        outbounds.append(out)
+        pool[tag] = dict(n["outbound"], tag=tag)
 
-    # 基础出口兜底
-    for base_tag, base_type in (("direct", "direct"), ("block", "block")):
-        if base_tag not in seen_tags:
-            outbounds.append({"type": base_type, "tag": base_tag})
-            seen_tags.add(base_tag)
+    # ---- 只把「被路由规则引用」的节点写进 outbounds ----
+    # 不再照抄整个节点池：check 是整份配置级别的，池子里任何一个 sing-box
+    # 认不出的节点都会让整份配置失效，从而拖垮每一次建号 / 改密 / 重载。
+    # 没人绑定的节点对运行毫无贡献，没有理由让它有这种杀伤力。
+    def _outbounds(referenced: list[str]) -> list[dict]:
+        out: list[dict] = []
+        seen: set[str] = set()
+        for tag in referenced:
+            if tag in pool and tag not in seen:
+                seen.add(tag)
+                out.append(pool[tag])
+        # 基础出口兜底（tag 与节点重名时不重复添加）
+        for base_tag, base_type in (("direct", "direct"), ("block", "block")):
+            if base_tag not in seen:
+                seen.add(base_tag)
+                out.append({"type": base_type, "tag": base_tag})
+        return out
 
     # ---- 封闭模式：一个 active 用户都没有 ----
     # mixed 入站 users 为空 => sing-box 不做任何认证。若此时 final 仍是 direct，
@@ -68,7 +79,7 @@ def build_config(
         return {
             "log": {"level": "error"},
             "inbounds": [{**inbound, "users": []}],
-            "outbounds": outbounds,
+            "outbounds": _outbounds([]),
             "route": {"rules": [], "final": "block"},
         }
 
@@ -79,7 +90,7 @@ def build_config(
         if not tag:
             logger.warning("用户 %s 没有绑定节点，该用户不会出现在配置里", u["username"])
             continue
-        if tag not in seen_tags:
+        if tag not in pool:
             logger.warning("用户 %s 的节点 %s 不在节点池，忽略该路由", u["username"], tag)
             continue
         routable.append(u)
@@ -101,16 +112,35 @@ def build_config(
         return {
             "log": {"level": "error"},
             "inbounds": [{**inbound, "users": []}],
-            "outbounds": [{"type": "block", "tag": "block"}],
+            "outbounds": _outbounds([]),
             "route": {"rules": [], "final": "block"},
         }
 
     return {
         "log": {"level": "error"},
         "inbounds": [{**inbound, "users": inbound_users}],
-        "outbounds": outbounds,
+        "outbounds": _outbounds([u["node_tag"] for u in routable]),
         "route": {"rules": route_rules, "final": "direct"},
     }
+
+
+def drop_invalid_nodes(nodes: list[dict]) -> tuple[list[dict], list[dict]]:
+    """按 sing-box check 过滤节点，返回 (可用节点, 被剔除的节点)。
+
+    给导入流程用的准入门槛：坏节点一旦入库，就会让此后每一次生成配置都
+    失败（原因见 core.validate_outbounds）。宁可少几个节点，也不能让一个
+    节点把整个面板拖成不可用。
+    """
+    nodes = list(nodes)
+    ok = set(core.validate_outbounds([n["outbound"] for n in nodes]))
+    good = [n for i, n in enumerate(nodes) if i in ok]
+    bad = [n for i, n in enumerate(nodes) if i not in ok]
+    if bad:
+        logger.warning(
+            "剔除 %d 个 sing-box 无法使用的节点: %s",
+            len(bad), ", ".join(n.get("name", n["tag"]) for n in bad),
+        )
+    return good, bad
 
 
 def write_config(cfg: dict, path=config.CONFIG_PATH) -> None:

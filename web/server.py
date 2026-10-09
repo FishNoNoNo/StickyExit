@@ -26,7 +26,9 @@ from auth import (
     activate, create_user, delete_user, proxy_endpoint, reset_password,
     revoke,
 )
-from converter import Supervisor, SupervisorError, generate_and_validate
+from converter import (
+    Supervisor, SupervisorError, drop_invalid_nodes, generate_and_validate,
+)
 from parser import (
     clash_node_to_outbound, fetch_nodes, normalize_outbound,
     parse_clash_yaml, parse_plain_links,
@@ -189,6 +191,15 @@ def create_app(db: DB | None = None) -> FastAPI:
         if not nodes:
             return _json({"ok": False, "error": "没有解析到节点"}, 400)
 
+        # 准入门槛：先过一遍 sing-box check，把认不出的节点挡在库外。
+        # check 是整份配置级别的，坏节点一旦入库会让此后每一次生成配置都失败。
+        nodes, invalid = drop_invalid_nodes(nodes)
+        if not nodes:
+            return _json({
+                "ok": False,
+                "error": f"解析到 {len(invalid)} 个节点，但 sing-box 都无法使用，未导入任何节点",
+            }, 400)
+
         with _lock:
             try:
                 _db = get_db()
@@ -201,6 +212,7 @@ def create_app(db: DB | None = None) -> FastAPI:
                 Supervisor().reload(cfg)
                 return _json({
                     "ok": True, "count": len(nodes), "added": added, "updated": updated,
+                    "skipped": [n.get("name", n["tag"]) for n in invalid],
                 })
             except Exception as e:
                 logger.exception("导入节点失败")

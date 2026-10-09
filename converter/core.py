@@ -59,3 +59,37 @@ def validate(cfg: dict) -> None:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def _check_outbounds(outbounds: list[dict]) -> bool:
+    """把一组 outbound 塞进最小配置试跑 check。"""
+    cfg = {
+        "log": {"level": "error"},
+        "outbounds": list(outbounds) + [{"type": "direct", "tag": "probe-base"}],
+        "route": {"final": "direct"},
+    }
+    try:
+        validate(cfg)
+    except Exception:
+        return False
+    return True
+
+
+def validate_outbounds(outbounds: list[dict]) -> list[int]:
+    """挑出 sing-box 真正认得的 outbound，返回其下标列表。
+
+    为什么需要逐节点预检：`sing-box check` 是整份配置级别的。只要有一个
+    outbound 让 sing-box 报错（多一个字段、transport 不支持……），整份配置
+    就通不过；而节点池是会被整体写进配置的，于是"一个坏节点"会让此后
+    每一次建号 / 改密 / 重载都失败。所以坏节点必须在入库前就挡掉。
+
+    先整批校验一次（正常情况只多起一个进程），失败才逐个定位。
+    """
+    if not outbounds:
+        return []
+    # 换成不冲突的探针 tag：节点自带 tag 是否重复属于另一码事，
+    # 不该影响"这个 outbound 本身能不能用"的判断。
+    probes = [dict(ob, tag=f"probe-{i}") for i, ob in enumerate(outbounds)]
+    if _check_outbounds(probes):
+        return list(range(len(outbounds)))
+    return [i for i, p in enumerate(probes) if _check_outbounds([p])]
