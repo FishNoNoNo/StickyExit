@@ -48,6 +48,10 @@ DB_PATH = DATA_DIR / "users.db"
 CONFIG_PATH = DATA_DIR / "sing-box.json"
 RUN_LOG_PATH = DATA_DIR / "sing-box.log"
 PIDFILE_PATH = DATA_DIR / "sing-box.pid"
+# 记录"当前在跑的 sing-box 实例用的是哪份配置"（内容摘要）。
+# 启动时靠它判断在跑的实例是不是陈旧的：sing-box 是 python 的子进程，
+# python 被强杀后它会被孤儿化并继续用旧配置服务，光看"端口在听"看不出来。
+CONFIG_HASH_PATH = DATA_DIR / "sing-box.sha"
 
 # 对外代理监听：0.0.0.0 = 所有网卡；只有一台机器就填本机内网/公网 IP 更稳
 LISTEN_IP = os.environ.get("LISTEN_IP", "0.0.0.0")

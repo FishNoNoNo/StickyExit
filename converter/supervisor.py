@@ -1,7 +1,8 @@
 ﻿# -*- coding: utf-8 -*-
 """sing-box 进程守护：启动 / 优雅重启 / 状态检测。
 
-- ensure_running()：进程不在才拉起；已在跑（本进程或其他进程）则复用。
+- ensure_running()：确保有一个"跑着当前配置"的实例。没在跑就拉起；在跑但
+  跑的不是当前配置就重启接管。判据是配置内容摘要，不是"有没有进程在"。
 - reload(cfg)：校验 -> 停旧 -> 等端口释放 -> 起新 -> 确认真的起来了。
   起不来就抛异常，绝不"假装成功"。
 
@@ -12,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +32,15 @@ class SupervisorError(RuntimeError):
     """sing-box 没能按预期起来/活着。"""
 
 
+def _file_digest(path: Path) -> str | None:
+    """配置文件内容的摘要；读不到返回 None。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
 class Supervisor:
     # 重启时最多等端口释放多久（秒）
     PORT_RELEASE_TIMEOUT = 10.0
@@ -42,6 +53,34 @@ class Supervisor:
         self._log_fh = None
 
     # ---------- 底层 ----------
+    def _remember_running(self, cfg_path: Path) -> None:
+        """记下"这个实例跑的是哪份配置"，供下次启动比对。"""
+        digest = _file_digest(cfg_path)
+        if not digest:
+            return
+        try:
+            config.CONFIG_HASH_PATH.write_text(digest, encoding="utf-8")
+        except OSError:
+            # 记不下来不影响本次运行，只是下次启动会保守地重启一次。
+            logger.warning("无法记录配置摘要，下次启动将重启 sing-box")
+
+    def _running_digest(self) -> str | None:
+        """在跑的实例所用的配置摘要；没有记录返回 None。
+
+        返回 None 时的比对必然不等 -> 重启接管，这是安全方向：
+        旧版本留下的实例没有这个记录，我们无从判断它跑的是什么。
+        """
+        try:
+            return config.CONFIG_HASH_PATH.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def _forget_running(self) -> None:
+        try:
+            config.CONFIG_HASH_PATH.unlink()
+        except OSError:
+            pass
+
     def _spawn(self, cfg_path: Path) -> subprocess.Popen:
         self._log_fh = open(config.RUN_LOG_PATH, "ab", buffering=0)
         env = os.environ.copy()
@@ -54,8 +93,22 @@ class Supervisor:
         )
         with open(config.PIDFILE_PATH, "w") as f:
             f.write(str(proc.pid))
+        self._remember_running(cfg_path)
         logger.info("sing-box 已启动 pid=%s", proc.pid)
         return proc
+
+    def _start(self, cfg_path: Path) -> None:
+        """拉起实例并确认真的在服务；没起来就别留下"它跑着"的记录。
+
+        摘要早写一步会让"启动失败"和"跑着旧配置"在下次启动时难以区分，
+        所以失败路径必须清掉。
+        """
+        proc = self._spawn(cfg_path)
+        try:
+            self._wait_until_serving(proc, self.STARTUP_TIMEOUT)
+        except Exception:
+            self._forget_running()
+            raise
 
     def _tail_log(self, n: int = 12) -> str:
         """取运行日志末尾几行 —— 启动失败时这是最有用的错误信息。"""
@@ -100,13 +153,30 @@ class Supervisor:
         )
 
     def ensure_running(self, cfg_path: Path = config.CONFIG_PATH):
-        """若进程不在则拉起。不主动重启正在跑的实例。"""
+        """确保有一个"跑着这份配置"的实例。
+
+        - 没在跑 -> 拉起。
+        - 在跑但跑的不是这份配置 -> 重启接管。
+
+        为什么"有进程在"不算数：sing-box 是 python 的子进程，python 被强杀
+        （或机器断电）后它会被孤儿化，继续用旧配置服务 —— 里面还留着上次
+        会话里已经停用的用户和已改过的旧口令，等于停用/改密全部失效。
+        所以判据必须是"这个实例跑的配置 == 当前配置"，靠内容摘要比对。
+        """
         if self._is_alive():
+            if self._running_digest() == _file_digest(cfg_path):
+                logger.info("复用正在运行的 sing-box 实例（与当前配置一致）")
+                return
+            logger.warning("在跑的 sing-box 与当前配置不一致，重启以应用当前配置")
+            self.reload(self._read_config(cfg_path), cfg_path)
             return
         if not cfg_path.exists():
             raise FileNotFoundError(f"配置文件不存在: {cfg_path}")
-        self.proc = self._spawn(cfg_path)
-        self._wait_until_serving(self.proc, self.STARTUP_TIMEOUT)
+        self._start(cfg_path)
+
+    @staticmethod
+    def _read_config(cfg_path: Path) -> dict:
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
 
     def _is_alive(self) -> bool:
         """进程是否活着：先看本进程，再按 pidfile / 监听端口兜底。"""
@@ -147,6 +217,9 @@ class Supervisor:
             config.PIDFILE_PATH.unlink()
         except OSError:
             pass
+        # 实例已经不在，"它跑着哪份配置"的记录必须一起清掉：
+        # 留着会让下次启动误判为"跑的是当前配置"而复用一个不存在的实例。
+        self._forget_running()
 
     def reload(self, cfg: dict, cfg_path: Path = config.CONFIG_PATH) -> None:
         """写入新配置 -> 校验 -> 停旧 -> 起新 -> 确认切换成功。
@@ -158,8 +231,7 @@ class Supervisor:
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         self._stop_any()
         self._wait_port_free(self.PORT_RELEASE_TIMEOUT)
-        proc = self._spawn(cfg_path)
-        self._wait_until_serving(proc, self.STARTUP_TIMEOUT)
+        self._start(cfg_path)
 
     def stop(self):
         self._stop_any()
