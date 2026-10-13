@@ -1,7 +1,7 @@
 services:
   proxy-distributor:
     build: .
-    image: stargrptech/sticky-exit:v1.0
+    image: stargrptech/sticky-exit:latest
     container_name: proxy-distributor
     restart: unless-stopped
 
