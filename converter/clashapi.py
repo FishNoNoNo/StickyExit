@@ -33,26 +33,17 @@ _MODE_CLASH = 1
 _MODE_TCP = 2
 
 
-def delay(tag: str, url: str = "") -> tuple[bool, int | None]:
-    """让 sing-box 真连一次这个出站。返回 (接口是否可用, 延迟ms)。
-
-    延迟只在接口可用且有值时用；失败的理解见模块注释。借口不可用 → False,
-    None，调用方退回 TCP 拨测。
-    """
-    timeout_ms = int(config.HEALTH_PROBE_TIMEOUT * 1000)
-    params: dict = {"timeout": timeout_ms}
+def _probe_params(url: str) -> dict:
+    """delay 接口的查询参数；url 为空时用配置里的探测 URL。"""
+    params: dict = {"timeout": int(config.HEALTH_PROBE_TIMEOUT * 1000)}
     url = url or config.HEALTH_PROBE_URL
     if url:
         params["url"] = url
-    try:
-        r = httpx.get(
-            f"{_base()}/proxies/{tag}/delay",
-            params=params,
-            headers=_headers(),
-            timeout=config.HEALTH_PROBE_TIMEOUT + 3.0,
-        )
-    except Exception:
-        return False, None
+    return params
+
+
+def _parse_delay(r) -> tuple[bool, int | None]:
+    """把 delay 接口的响应翻译成 (接口是否可用, 延迟ms)。"""
     if r.status_code in (404, 405, 501):
         return False, None            # 接口本身没有（tag 不存在也算）
     if r.status_code // 100 != 2:
@@ -62,6 +53,45 @@ def delay(tag: str, url: str = "") -> tuple[bool, int | None]:
     except Exception:
         return True, None
     return True, (int(ms) if ms else None)
+
+
+def delay(tag: str, url: str = "") -> tuple[bool, int | None]:
+    """让 sing-box 真连一次这个出站。返回 (接口是否可用, 延迟ms)。
+
+    延迟只在接口可用且有值时用；失败的理解见模块注释。接口不可用 → False,
+    None，调用方退回 TCP 拨测。
+    """
+    try:
+        r = httpx.get(
+            f"{_base()}/proxies/{tag}/delay",
+            params=_probe_params(url),
+            headers=_headers(),
+            timeout=config.HEALTH_PROBE_TIMEOUT + 3.0,
+        )
+    except Exception:
+        return False, None
+    return _parse_delay(r)
+
+
+async def adelay(tag: str, url: str = "",
+                 client: httpx.AsyncClient | None = None) -> tuple[bool, int | None]:
+    """delay() 的协程版：语义完全一致，只是走 async HTTP。
+
+    传入共享 client 可复用连接池 —— 探测循环用它在一轮里并发打几百个节点，
+    每个协程只占几 KB，不占线程栈。
+    """
+    path = f"{_base()}/proxies/{tag}/delay"
+    kwargs = dict(params=_probe_params(url), headers=_headers(),
+                  timeout=config.HEALTH_PROBE_TIMEOUT + 3.0)
+    try:
+        if client is not None:
+            r = await client.get(path, **kwargs)
+        else:
+            async with httpx.AsyncClient() as c:
+                r = await c.get(path, **kwargs)
+    except Exception:
+        return False, None
+    return _parse_delay(r)
 
 
 def _base() -> str:

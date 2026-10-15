@@ -95,6 +95,8 @@ CLASH_API_SECRET = os.environ.get("CLASH_API_SECRET", "").strip()
 # 探测周期。要数「连续 N 次失败」就必须反复探测，范围只限「进了某个用户池的
 # 节点」，不碰池外的节点。
 HEALTH_INTERVAL = max(1, int(os.environ.get("HEALTH_INTERVAL", "30")))
+# 每轮探测的最大并发数（协程）。协程很轻，池节点很多时可放心调大。
+HEALTH_MAX_WORKERS = max(1, int(os.environ.get("HEALTH_MAX_WORKERS", "20")))
 # 连续失败多少次才降级到下一个成员。压住「一次网络波动就切」。
 FAIL_THRESHOLD = max(1, int(os.environ.get("FAIL_THRESHOLD", "3")))
 # 连续成功多少次才回切到优先级更高的成员。压住「回切时来回抖」。

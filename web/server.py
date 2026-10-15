@@ -163,7 +163,7 @@ def create_app(db: DB | None = None) -> FastAPI:
             if not _token_ok(request):
                 return _unauthorized()
         elif path == "/" and config.WEB_ADMIN_TOKEN and not _token_ok(request):
-            return _unauthorized("未授权：请在 URL 后加 ?token=密码 打开管理页")
+            return _unauthorized("401 Unauthorized")
         return await call_next(request)
 
     # ---------- 页面 ----------

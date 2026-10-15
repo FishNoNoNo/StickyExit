@@ -20,12 +20,14 @@ APScheduler 定时跑一个周期：
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import httpx
 
 import config
-from auth.allocator import check_node_connectivity
+from auth.allocator import check_node_connectivity_async
 from converter import clashapi
 from converter.configgen import GROUP_PREFIX
 from storage import DB
@@ -46,13 +48,38 @@ def cycle_lock() -> threading.RLock:
     return CYCLE_LOCK
 
 
-def _probe(node: dict, use_clash: bool) -> bool:
-    if use_clash:
-        ok, ms = clashapi.delay(node["tag"])
-        if ok:
-            return ms is not None
-        # 探测中途才发现接口不可用：本次退回 TCP，下一轮会自动改方式。
-    return check_node_connectivity(node)
+async def _probe(node: dict, use_clash: bool, client: httpx.AsyncClient,
+                 sem: asyncio.Semaphore) -> bool:
+    """探测单个节点。信号量限流，避免一轮里同时打开过多连接。"""
+    async with sem:
+        if use_clash:
+            ok, ms = await clashapi.adelay(node["tag"], client=client)
+            if ok:
+                return ms is not None
+            # 探测中途才发现接口不可用：本次退回 TCP，下一轮会自动改方式。
+        return await check_node_connectivity_async(node)
+
+
+async def _probe_all(nodes: dict[str, dict], watch: list[str],
+                     use_clash: bool, limit: int) -> dict[str, bool]:
+    """并发探测池内所有节点，返回 {tag: 是否健康}。
+
+    用协程 + 信号量代替线程池：一个在途探测只占几 KB，比线程小两三个数量级，
+    所以并发上限（config.HEALTH_MAX_WORKERS）可以开得比线程池大得多。
+    """
+    limit = max(1, limit)
+    sem = asyncio.Semaphore(limit)
+    limits = httpx.Limits(max_connections=limit,
+                         max_keepalive_connections=limit)
+    async with httpx.AsyncClient(limits=limits) as client:
+        results = await asyncio.gather(
+            *(_probe(nodes[t], use_clash, client, sem) for t in watch),
+            return_exceptions=True,
+        )
+    out: dict[str, bool] = {}
+    for tag, res in zip(watch, results):
+        out[tag] = False if isinstance(res, BaseException) else bool(res)
+    return out
 
 
 def _switch(group: str, member: str, username: str, why: str) -> None:
@@ -123,15 +150,11 @@ def _run_once(db: DB) -> None:
     if not use_clash:
         logger.warning("Clash API 的 delay 接口不可用，改用 TCP 拨测（只能证明端口开着）")
 
-    healthy: dict[str, bool] = {}
-    with ThreadPoolExecutor(max_workers=min(20, len(watch))) as pool:
-        futs = {pool.submit(_probe, nodes[t], use_clash): t for t in watch}
-        for fut in as_completed(futs):
-            tag = futs[fut]
-            try:
-                healthy[tag] = bool(fut.result())
-            except Exception:
-                healthy[tag] = False
+    # 调度器跑在后台线程里（没有运行中的事件循环），所以这里可以安全地
+    # 用 asyncio.run 起一个新 loop 跑这一轮的并发探测。
+    healthy = asyncio.run(
+        _probe_all(nodes, watch, use_clash, config.HEALTH_MAX_WORKERS)
+    )
 
     with _state_lock:
         for tag, ok in healthy.items():
@@ -166,8 +189,9 @@ def start(db: DB) -> None:
     sched.start()
     _scheduler = sched
     logger.info(
-        "健康探测已启动：每 %ds 一轮，连续失败 %d 次降级 / 连续成功 %d 次回切",
-        config.HEALTH_INTERVAL, config.FAIL_THRESHOLD, config.RECOVER_THRESHOLD,
+        "健康探测已启动：每 %ds 一轮，最大并发 %d（协程），连续失败 %d 次降级 / 连续成功 %d 次回切",
+        config.HEALTH_INTERVAL, config.HEALTH_MAX_WORKERS,
+        config.FAIL_THRESHOLD, config.RECOVER_THRESHOLD,
     )
 
 

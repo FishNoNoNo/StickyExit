@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 import config
@@ -54,6 +55,34 @@ def check_node_connectivity(node: dict, timeout: float = config.NODE_CHECK_TIMEO
     except OSError as e:
         logger.debug("节点 %s 不可达: %s", node["tag"], e)
         return False
+
+
+async def check_node_connectivity_async(
+    node: dict, timeout: float = config.NODE_CHECK_TIMEOUT
+) -> bool:
+    """TCP 拨测节点服务器（协程版）。语义与 check_node_connectivity 完全一致。
+
+    区别只在用 asyncio 非阻塞连接：一个在途探测只占几 KB 协程内存，不像线程
+    那样每个都要预留 MB 级栈空间，所以池节点多时可以放心把并发开到很大。
+    """
+    out = node["outbound"]
+    host = str(out.get("server", ""))
+    port = int(out.get("server_port") or 0)
+    if not host or not port:
+        return False
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+    except (OSError, asyncio.TimeoutError) as e:
+        logger.debug("节点 %s 不可达: %s", node["tag"], e)
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+    return True
 
 
 def probe_many(db: storage.DB, nodes: list[dict]) -> list[str]:
